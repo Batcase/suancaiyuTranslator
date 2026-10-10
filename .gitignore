@@ -218,3 +218,49 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ======================================================================
+# 本项目专属（上面是 GitHub 的 Python 模板，下面这些别删）
+# ======================================================================
+
+# 用户配置与密钥 —— 绝不能提交
+config.toml
+.env
+
+# 日志与产物
+logs/
+stats/
+recordings/
+*.wav
+
+# 本地 Whisper 模型（几十 MB ~ 几 GB）
+models/
+
+# 打包产物（exe 有 28MB）
+dist/
+build/
+*.spec
+
+# 安卓构建产物
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/.cxx/
+android/captures/
+*.apk
+*.aab
+
+# 调试截图：默认忽略，只保留 README 里引用的那几张
+shots/*.png
+!shots/ja-overlay.png
+!shots/wizard.png
+!shots/settings.png
+!shots/android-overlay.png
+
+# 排查用的临时文件
+*.tmp
+android/COMMIT_MSG*.txt
+
