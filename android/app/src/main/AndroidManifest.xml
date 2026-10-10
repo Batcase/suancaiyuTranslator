@@ -71,5 +71,17 @@
                 <action android:name="com.suancaiyu.translator.ACTION_STOP" />
             </intent-filter>
         </receiver>
+
+        <!--
+          音频自测入口（排查"为什么没字幕"用的，普通用户用不到）。
+          需要 exported=true 才能用 adb 触发；只做一件事：让服务播一段测试音。
+        -->
+        <receiver
+            android:name=".service.SelfTestReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.suancaiyu.translator.SELFTEST" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

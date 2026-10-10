@@ -54,6 +54,21 @@ class AudioCaptureEngine(private val scope: CoroutineScope) {
 
     private val dropped = AtomicLong(0)
     private val totalFrames = AtomicLong(0)
+    private val totalBytes = AtomicLong(0)
+
+    /** 最近一帧的响度（0~1）。用于诊断"到底采到声音没有"。 */
+    @Volatile
+    var lastRms: Float = 0f
+        private set
+
+    /** 采集启动至今出现过的最大响度 —— 长时间为 0 说明根本没采到声音 */
+    @Volatile
+    var peakRms: Float = 0f
+        private set
+
+    val frameCount: Long get() = totalFrames.get()
+    val droppedCount: Long get() = dropped.get()
+    val capturedBytes: Long get() = totalBytes.get()
 
     /** 实际使用的采样率（可能不是 16k） */
     var actualSampleRate: Int = TARGET_SAMPLE_RATE
@@ -218,7 +233,10 @@ class AudioCaptureEngine(private val scope: CoroutineScope) {
                 }
                 if (pcm.isEmpty()) continue
                 val rms = rmsOf(native, read)
+                lastRms = rms
+                if (rms > peakRms) peakRms = rms
                 totalFrames.incrementAndGet()
+                totalBytes.addAndGet(pcm.size.toLong())
                 val emitted = _frames.tryEmit(Frame(pcm, System.currentTimeMillis(), rms))
                 if (!emitted) dropped.incrementAndGet()
             }

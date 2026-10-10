@@ -23,27 +23,69 @@
 
 ## 已验证
 
+在 **MuMu 模拟器（Android 12 / API 32 / x86_64）** 上真机跑过：
+
 ```
 ./gradlew :app:assembleDebug     → BUILD SUCCESSFUL
 产物: app/build/outputs/apk/debug/app-debug.apk  (13.0 MB)
 ```
 
-构建产物的核对结果：
+| 验证项 | 结果 |
+|---|---|
+| 安装与启动 | ✅ `Displayed MainActivity: +762ms`，界面完整渲染 |
+| **内录能采到音频内容** | ✅ 见下方自测日志 |
+| 系统投射授权流程 | ✅ 弹出 `MediaProjectionPermissionActivity`，授权后内录打开 |
+| 悬浮窗 | ✅ 挂在桌面之上，状态栏实时更新（截图见 `shots/android-overlay.png`） |
+| 识别降级 | ✅ 首选 401 失败 → 沿降级链尝试 → 全部失败后如实报错 |
+| 翻译降级 | ✅ 多家引擎依次尝试预热 |
+| 采集稳定性 | ✅ 持续采集 `dropped=0` |
+| 崩溃 | ✅ 无 `FATAL EXCEPTION` |
 
-- 包名 `com.suancaiyu.translator`，应用名 **酸菜鱼翻译器**，minSdk 29 / targetSdk 34
-- 权限齐全：`RECORD_AUDIO`、`SYSTEM_ALERT_WINDOW`、`FOREGROUND_SERVICE`、
-  `FOREGROUND_SERVICE_MEDIA_PROJECTION`、`POST_NOTIFICATIONS`
-- 84 个类已编译进 9 个 dex（translator/asr/audio/data/mt/pipeline/service/ui）
+### 内录验证的原始日志
 
-## 尚未验证（需要真机）
+内录失败最难查的表现是"界面在跑但没字幕"。所以内置了一个**音频自测**：
+播一段已知响度的正弦波，看采集侧的响度读数是否跟着变。
 
-编译通过不等于能跑。下面这些**必须在真机上试**，模拟器也测不准：
+```powershell
+# 先正常启动翻译（拿到投射授权），然后：
+adb shell am broadcast -a com.suancaiyu.translator.SELFTEST `
+  -n com.suancaiyu.translator.debug/com.suancaiyu.translator.service.SelfTestReceiver
+```
 
-- [ ] AudioPlaybackCapture 能否真的采到直播 App 的声音
-      （被采集的 App 可以声明拒绝，版权保护的影音一定会拒绝）
-- [ ] 悬浮窗在具体 ROM 上能否盖住直播画面（部分 ROM 需要"后台弹出界面"权限）
-- [ ] 前台服务在锁屏/切后台后能否持续运行（国产 ROM 会杀后台）
-- [ ] 端到端延迟实测
+实测输出：
+
+```
+音频自测开始   播放前 peak=0.0000
+TonePlayer     开始播放测试音：440.0Hz 4.0s 振幅=0.7
+采集统计        peak=0.4990  last=0.4936  dropped=0
+音频自测结果   → ✅ 内录能采到播放中的音频
+```
+
+响度从 `0.0000` 跳到 `0.4990`，与播放振幅 0.7 相符（正弦波 RMS ≈ 振幅/√2 ≈ 0.495）。
+**证明 AudioPlaybackCapture 真的拿到了播放中的音频数据**，而不只是"打开成功"。
+
+### 真机测试中发现并修复的两个 Bug
+
+这两个都是编译期完全看不出来的，只有真跑才会暴露：
+
+1. **后台线程更新 View 导致崩溃**
+   `ViewRootImpl$CalledFromWrongThreadException` —— 服务里在后台协程直接调用
+   `SubtitleOverlayView.render()`，而 Android 的 View 只能在创建它的线程上更新。
+   修复：所有渲染 `Handler.post` 到主线程。
+
+2. **识别引擎失败后不会降级**
+   Paraformer 返回 401 后只记了错误就停住，没有切到下一家（翻译层有降级，识别层漏了）。
+   修复：按降级链依次尝试；且只在"这家还没成功连上过"时才换，
+   避免一次网络抖动就把好用的引擎换掉。
+
+## 尚未验证（需要真机 + 真实直播环境）
+
+模拟器验证了通路，但下面这些模拟器测不准：
+
+- [ ] 真实直播 App 的声音能否采到（被采集的 App 可以声明拒绝，版权保护的影音一定会拒绝）
+- [ ] 悬浮窗在具体 ROM 上能否盖住全屏直播画面
+- [ ] 长时间后台运行会不会被国产 ROM 杀进程
+- [ ] 真实网络下的端到端延迟（Windows 端实测 687ms，安卓待测）
 
 ## 怎么构建
 

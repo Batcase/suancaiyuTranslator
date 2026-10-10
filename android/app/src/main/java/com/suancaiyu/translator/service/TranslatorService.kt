@@ -62,6 +62,7 @@ class TranslatorService : Service() {
 
         const val ACTION_START = "com.suancaiyu.translator.START"
         const val ACTION_STOP = "com.suancaiyu.translator.ACTION_STOP"
+        const val ACTION_SELFTEST = "com.suancaiyu.translator.SELFTEST"
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
         const val EXTRA_USE_MIC = "use_mic"
@@ -85,9 +86,15 @@ class TranslatorService : Service() {
         overlay = OverlayController(this)
         capture = AudioCaptureEngine(scope)
 
-        // 把字幕状态推给悬浮窗（同进程，直接观察 StateFlow 即可）
+        // 把字幕状态推给悬浮窗。
+        //
+        // ★ 必须 post 到主线程：Android 里 View 只能在创建它的线程上更新，
+        //   在后台协程里直接 render() 会抛 CalledFromWrongThreadException 并让整个服务崩溃。
+        //   （这个崩溃是在真机上跑出来的，编译期完全看不出来。）
         scope.launch {
-            store.state.collectLatest { s -> overlay.render(s) }
+            store.state.collectLatest { s ->
+                main.post { runCatching { overlay.render(s) } }
+            }
         }
     }
 
@@ -95,6 +102,12 @@ class TranslatorService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 stopEverything()
+                return START_NOT_STICKY
+            }
+            ACTION_SELFTEST -> {
+                // 音频自测：播一段已知响度的正弦波，看内录能不能采到。
+                // 用来区分"没声音在放"和"采集真的坏了"这两种完全不同的情况。
+                runSelfTest()
                 return START_NOT_STICKY
             }
             else -> {
@@ -201,6 +214,32 @@ class TranslatorService : Service() {
     }
 
     private fun afterCaptureReady() {
+        // 周期打印采集统计：内录失败最常见、最难查的表现就是"界面在跑但没声音"，
+        // 有这行日志一眼就能看出是采集问题还是识别问题
+        scope.launch {
+            var lastFrames = 0L
+            var quietTicks = 0
+            while (true) {
+                kotlinx.coroutines.delay(2000)
+                val frames = capture.frameCount
+                val delta = frames - lastFrames
+                lastFrames = frames
+                val stats = "frames=$frames(+$delta) peak=${"%.4f".format(capture.peakRms)} " +
+                    "last=${"%.4f".format(capture.lastRms)} bytes=${capture.capturedBytes} " +
+                    "dropped=${capture.droppedCount}"
+                Log.i(TAG, "采集统计 $stats")
+                if (capture.peakRms < 0.001f) {
+                    quietTicks += 1
+                    if (quietTicks == 5) {
+                        Log.w(TAG, "连续 10 秒没有采到任何声音 —— 可能是没有音频在播放，" +
+                            "或被采集的 App 禁止了录制（版权保护）")
+                    }
+                } else {
+                    quietTicks = 0
+                }
+            }
+        }
+
         // 显示悬浮窗（没有权限时只提示，不中断翻译——用户仍可在主界面看字幕）
         val shown = overlay.show(
             showPanel = settings.overlayPanel,
@@ -230,6 +269,43 @@ class TranslatorService : Service() {
                     pipe.feedAudio(frame.pcm, frame.capturedAtMs)
                 }
             }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // 音频自测
+    // ---------------------------------------------------------------
+
+    /**
+     * 播放一段正弦波并观察内录的响度读数。
+     *
+     * 判定逻辑：
+     *   * 播放前 peak 已经很高 → 本来就有声音，说明采集通路是通的
+     *   * 播放后 peak 明显上升 → **内录确实能采到播放的音频**（这是我们想证实的）
+     *   * 播放后 peak 仍是 0 → 采集通路有问题（或被系统策略拒绝）
+     */
+    private fun runSelfTest() {
+        scope.launch {
+            val before = capture.peakRms
+            Log.i(TAG, "=== 音频自测开始 === 播放前 peak=${"%.4f".format(before)}")
+            val played = com.suancaiyu.translator.audio.TonePlayer.play(
+                freqHz = 440.0, seconds = 4.0, amplitude = 0.7
+            )
+            if (!played) {
+                Log.e(TAG, "=== 音频自测失败 === 测试音没能播放（设备音频输出有问题）")
+                return@launch
+            }
+            // 等采集侧统计刷新
+            kotlinx.coroutines.delay(1500)
+            val after = capture.peakRms
+            val ok = after > 0.005f
+            Log.i(
+                TAG,
+                "=== 音频自测结果 === 播放前=${"%.4f".format(before)} " +
+                    "播放后=${"%.4f".format(after)} " +
+                    "内录frames=${capture.frameCount} dropped=${capture.droppedCount} " +
+                    "→ ${if (ok) "✅ 内录能采到播放中的音频" else "❌ 内录没采到任何声音"}"
+            )
         }
     }
 

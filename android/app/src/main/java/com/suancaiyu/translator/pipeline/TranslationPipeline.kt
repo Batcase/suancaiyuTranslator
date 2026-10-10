@@ -23,7 +23,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicBoolean
-
 /**
  * 编排层：把「内录 → 流式识别 → 翻译 → 悬浮字幕」串起来。
  *
@@ -46,6 +45,15 @@ class TranslationPipeline(
 
     private var asr: AsrClient? = null
     private var translator: Translator? = null
+
+    /** 识别降级链（只含配了 Key 的），失败时按顺序往下试 */
+    private var asrChain: List<AsrProvider> = emptyList()
+    private var asrIndex = 0
+    /** 已经试过几家。用来区分"连接中失败"和"运行中偶发失败" */
+    private var asrAttempts = 0
+    /** 每一家的连接是否已经成功过（连上过就不再当成"需要换一家"） */
+    private var asrConnected = false
+    private val switchingAsr = AtomicBoolean(false)
 
     /** 翻译请求：容量 1 且 DROP_OLDEST 就是"单飞 + 合并" */
     private val mtQueue = Channel<MtJob>(capacity = 1, onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST)
@@ -74,21 +82,17 @@ class TranslationPipeline(
     fun start(): Boolean {
         if (stopped.get()) return false
         val srcLang = settings.sourceLang
-        contextTurns = 3
 
-        // ---- 识别：按降级链取第一家可用的 ----
-        val asrChain = AsrProvider.chain(settings.asrProvider) { settings.hasKey(it) }
-        val chosen = asrChain.firstOrNull() ?: run {
+        // ---- 识别：建立降级链，先试第一家 ----
+        asrChain = AsrProvider.chain(settings.asrProvider) { settings.hasKey(it) }
+        if (asrChain.isEmpty()) {
             store.bumpError("没有可用的识别引擎（请先填 Key）")
             store.setState(RunState.ERROR, "没有可用的识别引擎")
             return false
         }
-        store.setActive(asr = chosen.label.substringBefore(" · "))
-        asr = createAsr(chosen, srcLang)
-        if (asr == null) {
-            store.bumpError("无法创建识别客户端")
-            return false
-        }
+        asrIndex = 0
+        asrAttempts = 0
+        if (!connectAsr()) return false
 
         // ---- 翻译：多引擎降级 ----
         val mtChain = MtProvider.chain(settings.mtProvider) { settings.hasKey(it) }
@@ -104,14 +108,63 @@ class TranslationPipeline(
             scope.launch(Dispatchers.IO) { runCatching { it.warmup() } }
         }
 
-        store.setState(RunState.RUNNING, "已连接 ${chosen.label.substringBefore(" · ")}")
-
         // ---- 翻译消费协程（单飞 + 合并） ----
         scope.launch { consumeTranslations() }
 
-        // ---- 启动识别 ----
-        asr?.start { event -> onAsrEvent(event) }
+        store.setState(RunState.RUNNING, "已连接 ${currentAsrLabel()}")
         return true
+    }
+
+    private fun currentAsrLabel(): String =
+        asr?.label ?: asrChain.getOrNull(asrIndex)?.id.orEmpty()
+
+    /** 连接识别链上的第 [asrIndex] 家。 */
+    private fun connectAsr(): Boolean {
+        val provider = asrChain.getOrNull(asrIndex)
+        if (provider == null) {
+            store.setState(RunState.ERROR, "所有识别引擎都连不上")
+            return false
+        }
+        runCatching { asr?.close() }
+        val client = createAsr(provider, settings.sourceLang)
+        if (client == null) {
+            store.bumpError("无法创建 ${provider.label} 客户端")
+            return false
+        }
+        asr = client
+        asrConnected = false
+        asrAttempts += 1
+        store.setActive(asr = provider.label.substringBefore(" · "))
+        store.setState(RunState.RUNNING, "正在连接 ${provider.label.substringBefore(" · ")}…")
+        Log.i(TAG, "尝试识别引擎 #$asrIndex: ${provider.id}")
+        client.start { event -> onAsrEvent(event) }
+        return true
+    }
+
+    /**
+     * 识别出问题时换下一家。
+     *
+     * 只在**这家还没成功连上过**时才切换 —— 否则一次网络抖动就会把好用的引擎换掉。
+     * 换过一轮（连最后一家也失败）就不再重试，避免无限循环烧 Key 额度。
+     */
+    private fun failoverAsr(reason: String) {
+        if (stopped.get() || asrConnected) return
+        if (!switchingAsr.compareAndSet(false, true)) return
+        try {
+            if (asrIndex + 1 >= asrChain.size) {
+                Log.w(TAG, "识别链已走完，全部失败。最后一个原因：$reason")
+                store.bumpError("识别引擎全部不可用：$reason")
+                store.setState(RunState.ERROR, "识别不可用")
+                return
+            }
+            asrIndex += 1
+            val next = asrChain[asrIndex]
+            Log.w(TAG, "识别失败（$reason），切换到 ${next.id}")
+            store.setState(RunState.RUNNING, "已切换到 ${next.label.substringBefore(" · ")}")
+            connectAsr()
+        } finally {
+            switchingAsr.set(false)
+        }
     }
 
     private fun createAsr(provider: AsrProvider, srcLang: String): AsrClient? {
@@ -129,10 +182,24 @@ class TranslationPipeline(
 
     private fun onAsrEvent(event: AsrEvent) {
         when (event.kind) {
-            AsrEvent.Kind.INFO -> Log.i(TAG, event.text)
+            AsrEvent.Kind.INFO -> {
+                // 连接成功（各客户端在握手完成时发这个），标记一下：
+                // 之后再出错就不换引擎了，因为问题多半是偶发的网络抖动
+                if (event.text.isNotEmpty()) {
+                    asrConnected = true
+                    Log.i(TAG, "识别已就绪：${event.text}")
+                    store.setState(RunState.RUNNING, event.text.take(24))
+                }
+            }
+
             AsrEvent.Kind.ERROR -> {
                 store.bumpError(event.text)
-                store.setState(RunState.RUNNING, event.text.take(30))
+                if (!asrConnected) {
+                    // 还没连上就失败（Key 无效 / 网络不通）→ 换下一家
+                    failoverAsr(event.text)
+                } else {
+                    store.setState(RunState.RUNNING, event.text.take(30))
+                }
             }
 
             AsrEvent.Kind.PARTIAL -> {
