@@ -1,0 +1,18 @@
+﻿# 酸菜鱼翻译器 —— 依赖
+# 安装： python -m pip install -r requirements.txt
+# 国内网络加镜像： -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# —— 必需 ——
+numpy>=1.24             # PCM 重采样 / 电平(VAD)计算
+websockets>=12.0        # Deepgram / OpenAI Realtime 流式 WebSocket
+requests>=2.31          # 翻译 REST 调用（OpenAI 兼容接口）
+python-dotenv>=1.0      # 从 .env 读 API Key
+
+# —— 可选：本地离线识别（不联网、免费，但吃 CPU）——
+# 装了这个才能用 --asr local
+faster-whisper>=1.0
+modelscope>=1.9         # 从国内源下载模型（HuggingFace 在国内常连不上）
+
+# —— 可选：sounddevice 后端（仅当你的 PortAudio 自带 WASAPI loopback 时才用得上）——
+# 本机实测不需要：内置的 ctypes WASAPI 后端更可靠
+# sounddevice>=0.4.6

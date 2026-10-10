@@ -1,0 +1,133 @@
+﻿# ============================================================
+# 酸菜鱼翻译器 —— 配置文件
+# 复制为 config.toml 后按需修改（config.toml 已被 .gitignore 忽略）
+# 所有字段都能用环境变量覆盖，环境变量优先级最高，见 README.md
+# ============================================================
+
+[audio]
+# 采集设备名（子串匹配，留空 = 自动选择默认扬声器的 loopback 设备）
+device = ""
+# 送入云端的采样率。Deepgram / OpenAI 都吃 16000Hz 单声道 PCM16
+sample_rate = 16000
+# 每包音频时长(ms)，越小延迟越低、包数越多。20~40ms 是甜点区
+chunk_ms = 32
+# 静音门限(0~1)：低于此电平的音频不发送，省流量、避免云端空转。0 = 关闭
+vad_threshold = 0.006
+# 静音后强制断开云端的空闲秒数（防止长时间无声导致 WebSocket 被判超时）
+idle_disconnect_s = 0.0
+
+[asr]
+# 识别引擎:
+#   paraformer = 阿里云百炼（默认，国内直连、稳定）
+#   deepgram   = 海外服务（国内网络有时连不上，可作备用）
+#   local      = 本地离线识别（免费，但慢约 5 倍、准确率较低）
+#   openai_realtime / mock
+#
+# 提示：可以多家都配 Key。首选引擎连不上时会**自动降级**到下一个已配 Key 的引擎
+# （云端服务会宕机，这是刻意设计的容错），字幕不会因此中断。
+provider = "paraformer"
+# 源语言。默认日语（主要使用场景）。
+# 选好之后有两处作用：
+#   1) 识别引擎按该语言识别（比自动判断更准更快）
+#   2) **提前告知翻译 AI「主要语言是什么」**，减少外来语/专有名词被误判
+language = "ja"
+
+[asr.paraformer]
+# paraformer-realtime-v2 支持中文/英文/日语/韩语/粤语/德语/法语/俄语
+model = "paraformer-realtime-v2"
+# 识别语种提示，可多选（如 ["ja","en"]）；留空 = 服务端自动判断
+language_hints = ["ja"]
+# VAD 断句静音阈值(ms)。官方默认 1300 对直播太慢；日语实测 500 较合适
+max_sentence_silence = 500
+# 语义断句：准确率更高但延迟更大。直播字幕用 VAD（false）更合适
+semantic_punctuation_enabled = false
+punctuation_prediction_enabled = true
+# 过滤"嗯、啊"这类语气词。直播口语建议关掉，保留语气更自然
+disfluency_removal_enabled = false
+# 心跳：持续发静音时保持连接不掉（直播常有长时间不说话）
+heartbeat = true
+# 业务空间专属域名（可选）。填了改用 {workspace_id}.cn-beijing.maas.aliyuncs.com，
+# 官方说更稳定。留空用通用域名
+workspace_id = ""
+
+[asr.deepgram]
+# nova-2 对日语实测比 nova-3 更准（nova-3 每句会丢掉开头几个字）
+model = "nova-2"
+# 判定一句话结束所需静音时长(ms)。日语实测：300 太激进（会把句子切成碎片，
+# 译文读不通）；500 最合适；700 会把两句并成一句；1000 几乎不切句
+endpointing_ms = 500
+# 中间结果(interim)刷新间隔(ms)
+interim_results_ms = 300
+
+[asr.openai_realtime]
+model = "gpt-4o-mini-transcribe"
+# 服务端 VAD 静音判定(ms)
+silence_duration_ms = 500
+
+[asr.local]
+# 本地离线识别（faster-whisper）。完全免费、不联网，但吃 CPU。
+#
+# 实测本机 CPU / int8 的实时倍率 RTF（越小越好，>1 就是跟不上）：
+#   tiny  : 2s音频 0.57s  RTF 0.29  ✅ 能流式，推荐
+#   small : 2s音频 3.16s  RTF 1.58  ❌ 越算越落后，只适合离线转写整段文件
+# 手机端建议直接从云端方案开始，本地模型在手机上会更慢。
+model = "tiny"
+# 留空 = 按 model 名自动从 ModelScope 下载（国内可达）；也可指向自己下好的目录
+model_path = ""
+device = "cpu"
+# int8 最快；有独显可改 float16 并把 device 改成 cuda
+compute_type = "int8"
+# 连续说话时的软切窗：攒到这么多秒就定稿一次，避免字幕无限增长。
+# 中间结果只发不切、窗口只在定稿时滚动，所以这个值直接决定"最长多久出一次定稿"。
+# 实测调小到 2.5 能把定稿延迟从 4.9s 降到 3.5s，但译文质量明显变差（切在词中间），
+# 所以默认保持 4.0。
+max_utterance_s = 4.0
+# 静音超过这么久判定一句话说完（本地识别没有服务端 endpointing，
+# 这个值决定"说完到出字幕"的等待时间，0.4~0.5 比较合适）
+silence_end_s = 0.45
+# 低于此电平视为静音
+silence_rms = 0.004
+# 软切窗时保留的重叠音频秒数，给模型一点上下文，减少断词错误
+overlap_s = 0.5
+
+[translate]
+# 翻译引擎: deepseek | openai | mock
+provider = "deepseek"
+target_language = "简体中文"
+# 每句话最多带几轮上文做上下文（跨句连贯性），0 = 不带
+context_turns = 3
+# 翻译历史滚动窗口（保持 prompt 稳定，命中原厂 prefix cache）
+context_window = 8
+timeout_s = 8
+
+[translate.deepseek]
+base_url = "https://api.deepseek.com"
+model = "deepseek-chat"
+
+[translate.openai]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+
+[overlay]
+# 悬浮窗宽高占屏幕比例
+width_ratio = 0.72
+height_ratio = 0.30
+# 距屏幕底边比例
+bottom_ratio = 0.07
+# 背景不透明度 0~1（仅在系统不支持透明色时作为降级使用）
+opacity = 0.72
+# 字幕后面是否加一层深色底板。false = 纯文字浮在画面上（推荐）
+background_panel = false
+# 字号
+original_font_size = 15
+translated_font_size = 24
+# 最多显示几行历史字幕
+max_lines = 2
+# 启动时是否鼠标穿透（不挡操作，Ctrl+Shift+U 可切换）
+click_through = true
+
+[hotkeys]
+# 全局热键（注册失败会自动降级为窗口内按键）
+toggle_click_through = "ctrl+shift+u"
+toggle_pause = "ctrl+shift+p"
+quit = "ctrl+shift+q"
