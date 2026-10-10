@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">酸菜鱼翻译器</string>
+    <string name="app_subtitle">直播实时翻译 · 小窗字幕</string>
+
+    <!-- 首次配置向导 -->
+    <string name="setup_title">欢迎使用酸菜鱼翻译器</string>
+    <string name="setup_desc">首次使用请填入 API Key（只保存一次，以后自动读取）</string>
+    <string name="setup_translate_key">① 翻译 Key（必需）</string>
+    <string name="setup_translate_hint">DeepSeek：platform.deepseek.com 注册后创建</string>
+    <string name="setup_asr_key">② 语音识别 Key（推荐阿里云，国内直连）</string>
+    <string name="setup_asr_hint">阿里云百炼：bailian.console.aliyun.com 开通后创建（有免费额度）</string>
+    <string name="setup_backup_key">③ 备用识别 Key（可留空，多配一家宕机不中断）</string>
+    <string name="setup_backup_hint">Deepgram：console.deepgram.com 注册送额度</string>
+    <string name="setup_test">测试</string>
+    <string name="setup_testing">验证中…</string>
+    <string name="setup_save">验证并保存</string>
+    <string name="setup_language">这场直播主要是</string>
+
+    <!-- 主界面 -->
+    <string name="main_start">启动翻译</string>
+    <string name="main_stop">停止翻译</string>
+    <string name="main_idle">未启动</string>
+    <string name="main_settings">设置</string>
+    <string name="main_overlay_permission">需要「悬浮窗」权限才能显示字幕</string>
+    <string name="main_grant">去授权</string>
+    <string name="main_projection_first">点「启动翻译」后，系统会询问是否允许录制/投射，请选择「立即开始」</string>
+
+    <!-- 运行状态 -->
+    <string name="state_starting">正在启动…</string>
+    <string name="state_running">识别中</string>
+    <string name="state_stopped">已停止</string>
+    <string name="state_paused">已暂停</string>
+    <string name="state_no_speech">等待声音…</string>
+
+    <!-- 通知 -->
+    <string name="notif_channel_name">翻译服务</string>
+    <string name="notif_channel_desc">保持字幕在后台运行</string>
+    <string name="notif_title">酸菜鱼翻译器正在运行</string>
+    <string name="notif_action_pause">暂停字幕</string>
+    <string name="notif_action_resume">继续字幕</string>
+    <string name="notif_action_lock">锁定位置</string>
+    <string name="notif_action_stop">停止</string>
+
+    <!-- 设置 -->
+    <string name="settings_title">设置</string>
+    <string name="settings_preferred_engine">首选引擎</string>
+    <string name="settings_asr">语音识别</string>
+    <string name="settings_mt">翻译</string>
+    <string name="settings_asr_keys">语音识别 Key</string>
+    <string name="settings_mt_keys">翻译 Key</string>
+    <string name="settings_keys_hint">填了哪家就能用哪家；首选连不上会自动降级。留空 = 不修改已保存的。</string>
+    <string name="settings_direction">翻译方向</string>
+    <string name="settings_source_lang">源语言（直播语言）</string>
+    <string name="settings_target_lang">目标语言</string>
+    <string name="settings_lang_hint">选好后会提前告知翻译 AI「主要语言」，减少外来语被误判</string>
+    <string name="settings_overlay">字幕窗</string>
+    <string name="settings_panel">字幕后面加深色底板</string>
+    <string name="settings_click_through">鼠标穿透（不挡直播操作）</string>
+    <string name="settings_save">保存设置</string>
+    <string name="settings_saved">已保存</string>
+
+    <!-- AudioPlaybackCapture 的说明（很多用户会以为"录不到声音"是坏了） -->
+    <string name="note_capture_policy">有些 App（尤其带版权保护的影音）会主动禁止被录制，这是系统限制，任何软件都绕不过。遇到这种情况可改用「麦克风模式」。</string>
+</resources>

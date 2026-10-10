@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与 Windows 端保持一致的深色风格 -->
+    <color name="bg">#FF15181C</color>
+    <color name="card">#FF1E2227</color>
+    <color name="fg">#FFE8EAED</color>
+    <color name="fg_dim">#FF9AA0A6</color>
+    <color name="accent">#FF4C8DFF</color>
+    <color name="ok">#FF3DD68C</color>
+    <color name="warn">#FFFFB020</color>
+    <color name="err">#FFFF6B6B</color>
+
+    <!-- 应用图标背景（自适应图标需要） -->
+    <color name="ic_launcher_background">#FF15181C</color>
+
+    <!-- 字幕配色：译文纯白、原文浅灰、未定稿暖黄 -->
+    <color name="subtitle_translated">#FFFFFFFF</color>
+    <color name="subtitle_source">#FFE8EAED</color>
+    <color name="subtitle_live">#FFFFE08A</color>
+    <color name="subtitle_outline">#FF000000</color>
+    <color name="subtitle_fail">#FFFF8A80</color>
+    <color name="subtitle_bar">#FF0E1116</color>
+</resources>

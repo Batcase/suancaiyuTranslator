@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  权限清单。
+
+  几个必须解释清楚的：
+  * RECORD_AUDIO        —— AudioPlaybackCapture 名义上属于"录音"，必须申请
+  * SYSTEM_ALERT_WINDOW —— 悬浮窗。**无法用运行时对话框申请**，只能跳系统设置页
+                           让用户手动打开，再用 Settings.canDrawOverlays() 回查
+  * FOREGROUND_SERVICE + _MEDIA_PROJECTION —— 后台常驻 + 屏幕/音频投射
+                           Android 14 起必须声明具体类型，否则 startForeground 直接抛异常
+  * POST_NOTIFICATIONS  —— Android 13+ 要单独申请，否则前台服务的常驻通知不可见
+  * FOREGROUND_SERVICE_MICROPHONE —— 兜底用麦克风采集时（DRM 内容录不到）需要；
+                           已在清单里声明，但只在用户主动选择该模式时才申请运行时权限
+
+  不需要的权限一律不申请（没有存储、没有位置、没有通讯录）。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <application
+        android:name=".App"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.SuanCaiYu"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          前台服务：真正干活的组件。
+          foregroundServiceType 必须包含 mediaProjection，否则 Android 10+ 起会崩。
+        -->
+        <service
+            android:name=".service.TranslatorService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection|microphone" />
+
+        <!--
+          用户从系统状态栏"停止投射"时，系统会发这个广播，
+          服务收到后要清理悬浮窗并停止，否则会留下僵尸通知。
+        -->
+        <receiver
+            android:name=".service.MediaProjectionStopReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.suancaiyu.translator.ACTION_STOP" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

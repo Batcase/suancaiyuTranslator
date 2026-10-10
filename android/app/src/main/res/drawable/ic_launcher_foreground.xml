@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  应用图标：一条鱼 + 一个"译"字的意象，用最简几何形状画出来。
+  用矢量（VectorDrawable）而不是多套 PNG：一个文件适配所有分辨率，体积也小。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 鱼身（水波蓝，呼应"酸菜鱼"的汤色偏青） -->
+    <path
+        android:fillColor="#4C8DFF"
+        android:pathData="M28,54 C34,42 46,36 58,38 C66,39 73,44 78,50 L86,42 L84,54 L86,66 L78,58 C73,64 66,69 58,70 C46,72 34,66 28,54 Z" />
+
+    <!-- 眼睛 -->
+    <path
+        android:fillColor="#15181C"
+        android:pathData="M40,50 m-3.2,0 a3.2,3.2 0 1,0 6.4,0 a3.2,3.2 0 1,0 -6.4,0" />
+
+    <!-- 下方的三条字幕线：点题"实时字幕" -->
+    <path
+        android:fillColor="#3DD68C"
+        android:pathData="M30,80 L78,80 L78,84 L30,84 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,88 L66,88 L66,92 L30,92 Z" />
+    <path
+        android:fillColor="#9AA0A6"
+        android:pathData="M42,96 L78,96 L78,99 L42,99 Z" />
+</vector>
