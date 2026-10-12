@@ -72,7 +72,13 @@ def main() -> int:
     check(params["format"] == "pcm", "parameters.format = pcm")
     check(params["sample_rate"] == 16000, "parameters.sample_rate = 16000")
     check(params["language_hints"] == ["ja"], "parameters.language_hints = ['ja']")
-    check(params["max_sentence_silence"] == 500, "parameters.max_sentence_silence = 500")
+    # 不写死数值——阈值可配，且随"等断句整句翻"的策略调整过（500 → 700）。
+    # 这里只验证"配置里的值被正确带进了报文"。
+    expected_silence = cfg.asr.paraformer.max_sentence_silence
+    check(
+        params["max_sentence_silence"] == expected_silence,
+        f"parameters.max_sentence_silence = {expected_silence}（与配置一致）",
+    )
     check(params["heartbeat"] is True, "parameters.heartbeat = true")
     check(
         "max_sentence_silence" in params,

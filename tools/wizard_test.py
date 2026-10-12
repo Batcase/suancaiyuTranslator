@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from livesub import keystore  # noqa: E402
 from livesub.app import AppPanel  # noqa: E402
+from livesub.config import load_config  # noqa: E402
 
 ENV = keystore.ENV_PATH
 BACKUP = ENV.with_suffix(".env.bak-test")
@@ -38,21 +39,30 @@ def main() -> int:
     print("首次配置向导自检")
     print("=" * 60)
 
+    # 这个自检要真的点「测试」并**验证通过**，所以必须要真实的 Key。
+    # 注意：它会在你配置好的 .env 上操作（先备份、测完还原），并且会真的调几次接口。
+    #
+    # 没有真实 Key 时**明确跳过**，而不是假装通过 —— 假 Key 到不了"校验通过"这一步。
     if not ENV.exists():
-        print("没有现成的 .env，无法取出 Key 来做测试")
-        return 2
+        print("没有 .env，无法测试向导")
+        print("跳过：这个自检需要真实的 API Key（它要验证「测试」按钮能通过）")
+        return 0
     keys = keystore.read_env()
+    missing = []
     if not keys.get("DEEPSEEK_API_KEY"):
-        print("缺少 DEEPSEEK_API_KEY，无法测试向导")
-        return 2
+        missing.append("DEEPSEEK_API_KEY（翻译）")
     if not (keys.get("DASHSCOPE_API_KEY") or keys.get("DEEPGRAM_API_KEY")):
-        print("缺少识别 Key（DASHSCOPE_API_KEY 或 DEEPGRAM_API_KEY），无法测试向导")
-        return 2
+        missing.append("DASHSCOPE_API_KEY 或 DEEPGRAM_API_KEY（识别）")
+    if missing:
+        print("缺少：" + "、".join(missing))
+        print("跳过：这个自检需要真实的 API Key（它要验证「测试」按钮能通过）")
+        print("      只验证 Key 格式校验（不联网）请跑 tools\\validate_format_test.py")
+        return 0
     for name in ("DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY", "DEEPGRAM_API_KEY"):
         if keys.get(name):
             SAVED_KEYS[name] = keys[name]
 
-    # 备份并清空现场，模拟"全新安装"
+    # 备份现场，然后移除 .env 模拟"全新安装"
     shutil.copy2(ENV, BACKUP)
     ENV.unlink()
     if TOML.exists():
@@ -168,7 +178,7 @@ def main() -> int:
     if TOML_BACKUP.exists():
         shutil.copy2(TOML_BACKUP, TOML)
         TOML_BACKUP.unlink()
-    print("\n已还原原有 .env / config.toml")
+    print(f"\n已还原原有 {ENV.name} / config.toml")
 
     print("=" * 60)
     if FAILED:

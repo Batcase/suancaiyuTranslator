@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import agc as agc_mod
 from . import audio as audio_mod
 from .asr import AsrEvent, create_asr
 from .config import Config
@@ -196,6 +197,11 @@ class Pipeline:
         self.translator = create_translator(cfg)
         self.actor = TranslatorActor(self.translator, state, stats, control)
 
+        # 自动增益：不同直播的音轨电平能差十几倍（实测某场 RMS 0.0120 vs 正常 0.1393），
+        # 不归一化的话识别侧会把它当静音，一句话都不出。
+        self.agc = agc_mod.AutoGain() if getattr(cfg.audio, "auto_gain", True) else None
+        self._agc_reported = False
+
         # 当前句
         self._sid = 0
         self._cur_source = ""
@@ -207,6 +213,12 @@ class Pipeline:
         self._sample_rate = cfg.audio.sample_rate
         # 每句的"发起时刻"，用于统计
         self._sentence_started = 0.0
+
+        # 等待断句的缓冲区（translate_on_sentence_end = True 时启用）。
+        # 识别中间结果往这里攒，等这一句说完再整句发给翻译。
+        self._pending = ""
+        self._pending_since = 0.0     # 这一句第一段文字到达的时刻
+        self._pending_last = 0.0      # 最近一次有新内容的时刻（用于静默兜底）
 
     # ------------------------------------------------------------------
     async def run(self) -> None:
@@ -366,10 +378,16 @@ class Pipeline:
                     continue
                 if self.control.paused.is_set():
                     continue
+                # 静默兜底：服务端迟迟不给 sentence_end（网络卡顿、或一句话说了很久）时，
+                # 靠这个定时检查把攒着的整句发出去，避免字幕一直空着。
+                self._maybe_flush_pending(force=False)
                 self.stats.audio_seconds += chunk.samples / self._sample_rate
                 if not chunk.silent:
                     last_speech = time.monotonic()
-                asr.send_audio(chunk.pcm, chunk.captured_at)
+                pcm = chunk.pcm
+                if self.agc is not None and not chunk.silent:
+                    pcm = self.agc.process(pcm)
+                asr.send_audio(pcm, chunk.captured_at)
 
         pump = asyncio.create_task(audio_pump())
         try:
@@ -379,6 +397,8 @@ class Pipeline:
                     print("[pipeline] 长时间无声，主动结束会话以便重连")
                     break
         finally:
+            # 会话结束前把攒着没翻的那半句也发出去，不然字幕会停在半句话上
+            self._maybe_flush_pending(force=True)
             pump.cancel()
             await asyncio.gather(pump, return_exceptions=True)
             await asr.aclose()
@@ -387,19 +407,18 @@ class Pipeline:
 
     # ------------------------------------------------------------------
     def _on_event(self, event: AsrEvent, logger: TranscriptLogger) -> None:
-        if event.kind == "info":
-            if event.text and event.text != "speech_started":
+        if event.kind in ("info", "warning"):
+            if event.text:
                 print(f"[asr] {event.text}")
             return
-
         if event.kind == "error":
             self.state.bump(errors=1)
-            self.state.set_status(detail=event.text[:60])
             print(f"[asr] 错误: {event.text}", file=sys.stderr)
             return
 
         text = (event.text or "").strip()
         captured_at = event.audio_captured_at or time.monotonic()
+        on_sentence_end = getattr(self.cfg.translate, "translate_on_sentence_end", True)
 
         if event.kind == "partial":
             if not text:
@@ -412,12 +431,23 @@ class Pipeline:
             self._cur_captured_at = captured_at
             self.state.bump(asr_events=1)
             self.state.set_source(self._sid, text)
-            self._maybe_speculate(text, captured_at)
+
+            if on_sentence_end:
+                # 只攒着，不动翻译。等断句（或兜底条件）再整句翻。
+                self._pending = text
+                now = time.monotonic()
+                if not self._pending_since:
+                    self._pending_since = now
+                self._pending_last = now
+                self._maybe_flush_pending(force=False)
+            else:
+                # 旧行为：中间结果也翻（延迟更低但会碎片化、更烧 token）
+                self._maybe_speculate(text, captured_at)
             return
 
         if event.kind == "final":
             if not event.is_utterance_end:
-                # 这段音频定稿了，但句子可能还没说完
+                # 这段音频定稿了，但服务端认为句子可能还没说完
                 if text:
                     if not self._cur_source:
                         self._sid = self.state.begin_sentence()
@@ -425,13 +455,27 @@ class Pipeline:
                     self._cur_source = text
                     self._cur_captured_at = captured_at
                     self.state.set_source(self._sid, text)
-                    self._maybe_speculate(text, captured_at, force=True)
+                    if on_sentence_end:
+                        self._pending = text
+                        now = time.monotonic()
+                        if not self._pending_since:
+                            self._pending_since = now
+                        self._pending_last = now
+                        # 音频段已定稿：这是最可靠的"半句边界"，
+                        # 如果已经攒得够多就先翻掉，不然等真正的断句
+                        self._maybe_flush_pending(force=False)
+                    else:
+                        self._maybe_speculate(text, captured_at, force=True)
                 return
 
-            # 句子结束
+            # ---- 真正的断句：这一句说完了 ----
             final_text = text or self._cur_source
             self.stats.on_final(captured_at)
             self.state.bump(asr_events=1)
+
+            if on_sentence_end and self._pending.strip():
+                # 缓冲区比"最后一段"更完整（它含了整句），以它为准
+                final_text = self._pending.strip()
 
             if not final_text.strip():
                 if self._sid:
@@ -462,8 +506,77 @@ class Pipeline:
             )
             self._reset_sentence()
 
+    # ------------------------------------------------------------------
+    #: 可以在句末安全切分、并且切出来仍是"完整小句"的标点。
+    #: 中文句号/问号/叹号 + 日文 。！？ + 英文 .!?
+    _SOFT_BREAK = "。！？!?…‥"
+
+    def _maybe_flush_pending(self, force: bool = False) -> None:
+        """判断攒着的这句话要不要现在就翻。
+
+        触发条件（先满足哪个算哪个）：
+          1. force —— 调用方明确要求（会话结束冲刷）
+          2. 攒够 max_pending_chars —— 防止一口气说很久导致字幕一直空着
+          3. 静默超过 pending_timeout_ms —— 服务端没给 sentence_end 时的兜底
+          4. **标点软断句**：攒到一定长度且末尾刚好是句末标点
+
+        关于第 4 条（重要）
+        ------------------
+        实测发现：带 BGM 的直播音频动态范围被压得极平（P10~P90 只有 1dB），
+        **靠能量阈值根本找不到停顿**（Silero VAD 会判定 0 段），
+        所以"静默兜底"在这种源上几乎不触发，只剩"攒够字符数硬切"——
+        而那会在句子中间切断。
+
+        好在 Paraformer 与 Deepgram 都开了标点预测。用"末尾是句末标点"
+        作为断点，既不会在句子中间切，又不依赖音频能量。
+        """
+        text = self._pending.strip()
+        if not text:
+            return
+        now = time.monotonic()
+
+        if not force:
+            hard_limit = int(getattr(self.cfg.translate, "max_pending_chars", 60))
+            quiet_ms = (now - self._pending_last) * 1000 if self._pending_last else 0.0
+            silent_too_long = quiet_ms >= float(
+                getattr(self.cfg.translate, "pending_timeout_ms", 1200)
+            )
+            too_long = len(text) >= hard_limit
+            # 软断句：至少 12 个字，且末尾是句末标点，且已攒到一半以上容量
+            punct_ok = (
+                len(text) >= 12
+                and text[-1] in self._SOFT_BREAK
+                and len(text) >= hard_limit * 0.5
+            )
+            if not (too_long or silent_too_long or punct_ok):
+                return
+
+        # 发起翻译，并把这一刻的缓冲区清掉
+        sid = self._sid
+        if not sid:
+            return
+        captured = self._cur_captured_at or now
+        self.state.set_source(sid, text, final=True)
+        self.state.commit(sid)
+        self.actor.submit(
+            text,
+            self.actor.context(),
+            final=True,
+            captured_at=captured,
+            sid=sid,
+            source_text=text,
+        )
+        # 这一句已经提交，后面的内容算下一句
+        self._pending = ""
+        self._pending_since = 0.0
+        self._pending_last = 0.0
+        self._last_spec_text = text
+
     def _maybe_speculate(self, text: str, captured_at: float, force: bool = False) -> None:
-        """中间结果翻译：节流，避免每个 token 都打一次 API。"""
+        """中间结果翻译：节流，避免每个 token 都打一次 API。
+
+        仅在 translate_on_sentence_end = False 时使用（旧行为）。
+        """
         now = time.monotonic()
         grew_enough = len(text) - len(self._last_spec_text) >= self._spec_min_growth
         first_time = not self._last_spec_text
@@ -485,3 +598,6 @@ class Pipeline:
         self._last_spec_text = ""
         self._last_spec_at = 0.0
         self._sid = 0
+        self._pending = ""
+        self._pending_since = 0.0
+        self._pending_last = 0.0

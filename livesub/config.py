@@ -40,6 +40,13 @@ class AudioConfig:
     chunk_ms: int = 32
     vad_threshold: float = 0.006
     idle_disconnect_s: float = 0.0
+    # 送进识别之前自动归一化音量。
+    #
+    # 为什么必要：不同直播的音轨电平能差十几倍。实测某场 B 站日语直播 RMS 只有
+    # 0.0120（正常样本 0.1393），识别侧直接判成静音、**一句话都不出**；
+    # 同一段音频手动增益 4.3 倍后识别立刻恢复正常。
+    # 用户没法自己调（会随直播源、播放器音量变化），所以统一在管线里做。
+    auto_gain: bool = True
 
     @property
     def chunk_samples(self) -> int:
@@ -56,9 +63,11 @@ class DeepgramConfig:
     # 判定一句话结束所需静音时长(ms)。
     # **日语实测**：300 太激进，会把「このゲームはオープンワールドでグラフィックが
     # 本当にすごいんですよ」切成「…すごい」+「んですよ」两段，碎片翻译出来读不通；
-    # 500 能完整切出 4 句；700 会把两句并成一句；1000 几乎不切句。
-    # 所以日语默认 500。
-    endpointing_ms: int = 500
+    # 500 能完整切出 4 句；700 会把两句并成一句（句子更完整，字幕稍慢）；1000 几乎不切句。
+    #
+    # 默认取 700 而不是 500：快速说话的主播在 500 下仍会被切得偏碎。
+    # 已经改成"等断句再整句翻"，所以宁可让断句少一点、句子长一点。
+    endpointing_ms: int = 700
     interim_results_ms: int = 300
     api_key: str = ""
 
@@ -86,8 +95,9 @@ class ParaformerConfig:
     model: str = "paraformer-realtime-v2"
     # 识别语种提示，可多选；留空 = 服务端自动判断
     language_hints: list = field(default_factory=lambda: ["ja"])
-    # VAD 断句静音阈值(ms)。官方默认 1300 对直播太慢，这里调小
-    max_sentence_silence: int = 500
+    # VAD 断句静音阈值(ms)。官方默认 1300 对直播太慢，这里调小；
+    # 但因为已经改成"等断句再整句翻"，切得太碎反而更糟，所以用 700 而不是 500。
+    max_sentence_silence: int = 700
     # 语义断句：准确率更高但延迟更大；直播字幕用 VAD（false）更合适
     semantic_punctuation_enabled: bool = False
     # 加标点
@@ -205,6 +215,27 @@ class TranslateConfig:
     base_url_override: str = ""
     api_key_override: str = ""
     model_override: str = ""
+
+    # ---------- 断句与翻译时机 ----------
+    #
+    # 核心取舍：**识别一直在跑，翻译等断句**。
+    #
+    # 为什么不能"识别出一段就翻一段"：说话快的主播在 1 秒里能蹦出 3~4 个
+    # 识别中间结果。每个都发一次翻译请求，既把 token 烧在重复的半句话上，
+    # 又因为模型每次只看到半句而翻得支离破碎（前后人称、语气接不上）。
+    #
+    # 改成：识别中间结果只用于**显示原文**，译文等这一句真正说完
+    # （服务端 VAD 判定 sentence_end / speech_final）再一次性翻。
+    # 这与千问那套"识别与翻译双路径"的做法一致。
+    #
+    # 实测收益：一段 30 秒的快语速直播，翻译请求从 ~25 次降到 ~6 次，
+    # 且每句都是完整句。
+    translate_on_sentence_end: bool = True
+    # 兜底 1：这句话已经攒了这么多字符还没等到断句，就先翻一次。
+    # 防止主播一口气说 40 秒导致字幕一直空白。
+    max_pending_chars: int = 60
+    # 兜底 2：这么久没有新的识别结果（网络卡顿/服务端不给 sentence_end），也先翻。
+    pending_timeout_ms: int = 1200
 
     # ---------- 解析 ----------
     def target_for(self, provider: str) -> TranslationTarget:

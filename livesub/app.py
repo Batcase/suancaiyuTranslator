@@ -479,6 +479,29 @@ class AppPanel:
             activeforeground=FG,
         ).pack(anchor="w", padx=10, pady=(0, 10))
 
+        # ---- 翻译时机：等断句整句翻 vs 边识别边翻 ----
+        self.v_sentence = tk.BooleanVar(value=self.cfg.translate.translate_on_sentence_end)
+        tk.Checkbutton(
+            card3,
+            text="等主播说完一句再整句翻译（推荐：译文连贯、省 token）",
+            variable=self.v_sentence,
+            font=self.f_small,
+            fg=FG,
+            bg=CARD,
+            selectcolor=CARD,
+            activebackground=CARD,
+            activeforeground=FG,
+        ).pack(anchor="w", padx=10)
+        self._label(
+            card3,
+            "取消勾选 = 边说边翻，字幕出现更快，但快语速主播的译文会碎片化、也更费 token",
+            self.f_small,
+            FG_DIM,
+            CARD,
+            wraplength=520,
+            justify="left",
+        ).pack(anchor="w", padx=26, pady=(0, 10))
+
         # ---- 字幕窗 ----
         card4 = self._card(f)
         card4.pack(fill="x", **pad, pady=(0, 10))
@@ -746,6 +769,7 @@ class AppPanel:
 
         self._apply_language_from(self.cb_source, self.cb_target)
         self.cfg.translate.send_language_hint = self.v_hint.get()
+        self.cfg.translate.translate_on_sentence_end = self.v_sentence.get()
         self.cfg.overlay.background_panel = self.v_panel.get()
         self.cfg.overlay.click_through = self.v_click.get()
         keystore.save_config(self.cfg)
@@ -788,6 +812,7 @@ class AppPanel:
         tr_label = next((lb for p, lb in TRANSLATE_CHOICES if p == (self.cfg.translate.provider or "").lower()), None)
         self.cb_translate.set(tr_label or TRANSLATE_CHOICES[0][1])
         self.v_hint.set(self.cfg.translate.send_language_hint)
+        self.v_sentence.set(self.cfg.translate.translate_on_sentence_end)
         self.v_panel.set(self.cfg.overlay.background_panel)
         self.v_click.set(self.cfg.overlay.click_through)
 
