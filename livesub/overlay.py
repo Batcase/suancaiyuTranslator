@@ -32,6 +32,40 @@ IS_WINDOWS = sys.platform == "win32"
 
 SENTINEL = "#010203"  # 哨兵色：整块变透明
 
+# ---- 全局低级鼠标钩子（为了拿到滚轮）----
+#
+# 为什么必须用钩子而不是 tkinter 的 <MouseWheel> 事件：
+#
+#   1. 面板默认是**鼠标穿透**的（`WS_EX_TRANSPARENT`）。该状态下窗口
+#      **完全不接收鼠标消息** —— 系统把滚轮消息直接转给下层窗口
+#      （也就是直播软件），canvas 上的绑定永远不会触发。
+#   2. 实测**即使关掉穿透**，`overrideredirect(True)` 的无边框窗口没有焦点，
+#      滚轮消息也不一定会路由到画布上（实测 yview 一动不动）。
+#
+# 所以改用 WH_MOUSE_LL 全局钩子：不依赖窗口是否穿透、是否有焦点，
+# 拿到滚轮后自己判断"鼠标是不是在面板范围内"，是才滚动。
+# 注意只能用低级钩子（不能注入/拦截），回调里必须**尽快返回**，
+# 否则会拖慢整个系统的鼠标响应。
+WH_MOUSE_LL = 14
+WM_MOUSEWHEEL = 0x020A
+WM_MOUSEHWHEEL = 0x020E
+LLMHF_INJECTED = 0x00000001
+
+#: 钩子回调的原型（必须保持引用，否则会被 GC 掉导致崩溃）
+HOOKPROC = ctypes.WINFUNCTYPE(
+    ctypes.c_ssize_t, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
+)
+
+
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("pt", wintypes.POINT),
+        ("mouseData", ctypes.c_ulong),
+        ("flags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
 COLOR_OUTLINE = "#000000"  # 文字描边，保证在亮画面上也读得清
 COLOR_SOURCE = "#E8EAED"
 COLOR_SOURCE_DIM = "#9AA0A6"
@@ -149,6 +183,15 @@ class SubtitleOverlay:
         self._hover_override = False
         #: 首帧是否已经强制刷过状态栏（见 _tick）
         self._first_render_done = False
+        #: 全局鼠标钩子（滚轮）
+        self._hook = None
+        self._hook_proc = None
+        #: 面板屏幕矩形（钩子回调里高频读取，缓存起来）
+        self._panel_rect = (0, 0, 0, 0)
+        #: 当前是否悬停在面板上（由钩子驱动，不能用 tk 的 <Enter>）
+        self._hover_state = False
+        #: tick 计数（用于周期性刷新面板矩形）
+        self._tick_count = 0
 
     # ================= 对外接口 =================
     def request_action(self, action: str) -> None:
@@ -161,6 +204,8 @@ class SubtitleOverlay:
             raise RuntimeError("这个悬浮窗实例已经停止，请重新创建实例")
         self._build()
         self._register_hotkeys()
+        self._install_mouse_hook()
+        self._refresh_panel_rect()
         self._tick_job = self.root.after(40, self._tick)
         self._flash("字幕已开启：F1 穿透 / F2 暂停 / F3 行数 / 拖动移动", 5000)
 
@@ -170,6 +215,7 @@ class SubtitleOverlay:
             return
         self._closed = True
         self._unregister_hotkeys()
+        self._uninstall_mouse_hook()
         for job in (self._tick_job, self._hint_job):
             if job is not None:
                 try:
@@ -388,6 +434,109 @@ class SubtitleOverlay:
         self._grip.bind("<ButtonRelease-1>", self._on_resize_release)
         self._grip.bind("<Enter>", lambda e: self._set_cursor("size_nw_se"))
         self._grip.bind("<Leave>", lambda e: self._set_cursor(""))
+
+    def _on_panel_hover(self, hovering: bool) -> None:
+        """鼠标进出面板时临时切换"鼠标穿透"（现在由全局钩子驱动）。
+
+        为什么需要：面板默认穿透（不挡直播软件的点击），而穿透在 Win32 里就是
+        `WS_EX_TRANSPARENT` —— 那个状态下窗口**不接收任何鼠标消息**。
+
+        注意：**不能靠 tkinter 的 `<Enter>` 事件来触发**（那也依赖收到鼠标消息，
+        穿透时同样收不到，是个死循环）。所以现在由 WH_MOUSE_LL 全局钩子根据
+        光标坐标判断悬停，再回调到这里。
+        """
+        if not IS_WINDOWS or self.win is None:
+            return
+        # 用户用 F1 手动关过穿透时就不折腾了
+        if self._hover_override:
+            return
+        if hovering == self._hover_state:
+            return
+        self._hover_state = hovering
+        try:
+            self._apply_click_through(not hovering)
+        except Exception:
+            pass
+
+    # ================= 全局鼠标钩子（滚轮）=================
+    def _install_mouse_hook(self) -> None:
+        """装 WH_MOUSE_LL，用来自主处理滚轮。
+
+        低级钩子不注入、不拦截（回调恒返回 CallNextHookEx），
+        只"顺便看一眼"滚轮消息，所以对系统影响最小。
+        """
+        if not IS_WINDOWS:
+            return
+        try:
+            self._hook_proc = HOOKPROC(self._mouse_hook)
+            self._hook = user32.SetWindowsHookExW(
+                WH_MOUSE_LL, self._hook_proc, None, 0
+            )
+            if not self._hook:
+                print("[overlay] 全局鼠标钩子安装失败，滚轮翻页将不可用", file=sys.stderr)
+                self._hook_proc = None
+        except Exception as exc:
+            print(f"[overlay] 全局鼠标钩子异常: {exc}", file=sys.stderr)
+            self._hook_proc = None
+
+    def _uninstall_mouse_hook(self) -> None:
+        if self._hook:
+            try:
+                user32.UnhookWindowsHookEx(self._hook)
+            except Exception:
+                pass
+            self._hook = None
+        self._hook_proc = None
+
+    def _mouse_hook(self, code: int, wparam: int, lparam: int):
+        """钩子回调。**必须极快返回**，否则拖慢整机鼠标。"""
+        try:
+            if code >= 0 and wparam == WM_MOUSEWHEEL and self.transcript is not None:
+                info = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+                # 忽略自己注入的消息，避免递归
+                if not (info.flags & LLMHF_INJECTED):
+                    if self._point_in_panel(info.pt.x, info.pt.y):
+                        delta = ctypes.c_short((info.mouseData >> 16) & 0xFFFF).value
+                        # 不能在钩子回调里直接操作 tk（会在错误线程/重入）。
+                        # 交给 after(0) 在主线程里做。
+                        self.root.after(0, lambda d=delta: self._wheel_scroll(d))
+        except Exception:
+            pass
+        return user32.CallNextHookEx(None, code, wparam, lparam)
+
+    def _point_in_panel(self, x: int, y: int) -> bool:
+        """光标是否在面板范围内（用窗口矩形判断）。"""
+        if self.win is None:
+            return False
+        try:
+            return (
+                self._panel_rect[0] <= x <= self._panel_rect[2]
+                and self._panel_rect[1] <= y <= self._panel_rect[3]
+            )
+        except Exception:
+            return False
+
+    def _refresh_panel_rect(self) -> None:
+        """缓存窗口屏幕矩形（钩子里每 40ms 会用到，不能每次都查系统）。"""
+        if self.win is None:
+            return
+        try:
+            self.win.update_idletasks()
+            x, y = self.win.winfo_rootx(), self.win.winfo_rooty()
+            w, h = self.win.winfo_width(), self.win.winfo_height()
+            self._panel_rect = (x, y, x + w, y + h)
+        except Exception:
+            pass
+
+    def _wheel_scroll(self, delta: int) -> None:
+        """滚轮翻页（在主线程执行）。delta>0 = 上滚 = 回看历史。"""
+        tv = self.transcript
+        if tv is None:
+            return
+        steps = int(delta / 120)
+        if steps == 0:
+            steps = 1 if delta > 0 else -1
+        tv.scroll_by(-steps * 3)
 
     def _set_cursor(self, name: str) -> None:
         try:
@@ -642,7 +791,28 @@ class SubtitleOverlay:
                 self._first_render_done = True
             except Exception:
                 pass
+
+        # 每 ~200ms 刷新一次面板矩形并同步悬停状态。
+        #
+        # 为什么不靠 tk 的 <Enter>/<Leave>：面板穿透时窗口收不到鼠标消息，
+        # 那两个事件根本不会触发（死循环）。所以这里主动用光标坐标判断，
+        # 再配合全局钩子给出的滚轮事件。
+        self._tick_count += 1
+        if self._panel_mode and self._tick_count % 5 == 0:
+            self._refresh_panel_rect()
+            self._sync_hover_by_pointer()
+
         self.root.after(40, self._tick)
+
+    def _sync_hover_by_pointer(self) -> None:
+        """按光标位置更新悬停状态（穿透时 <Enter> 不可用，只能这样）。"""
+        if self.win is None or self._hover_override:
+            return
+        try:
+            x, y = self.win.winfo_pointerxy()
+        except Exception:
+            return
+        self._on_panel_hover(self._point_in_panel(x, y))
     def _render(self) -> None:
         lines, status = self.state.snapshot()
         if self._panel_mode:

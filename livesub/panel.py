@@ -147,6 +147,10 @@ class TranscriptView:
         self.canvas.yview_scroll(units, "units")
         self._sync_follow()
 
+    def scroll_by(self, units: int) -> None:
+        """供外部（全局鼠标钩子）调用：滚轮翻页。"""
+        self._scroll_units(units)
+
     def _sync_follow(self) -> None:
         if not self.auto_scroll:
             return
@@ -173,11 +177,18 @@ class TranscriptView:
     def update_rows(self, rows: list[SubtitleLine]) -> None:
         """用最新的状态刷新面板。
 
-        只重建"内容变了"的那些行；其余复用已有 canvas item。
+        ★ 关键：**先全量测量高度，再按最终位置一次性绘制**。
+
+        为什么不能"边测边画、只重画变化的那块"：
+        canvas 的 item 是"后创建的在上面"。译文是流式增长的，某一行的字变多
+        → 这一行要重画 → **新画的底板矩形会压住上面那些还没重画的行**，
+        视觉上就是"下一行叠在上一行上面"。实测确认过这个现象。
+
+        全量重绘的代价很小（几十个 item），换来的是永远不会叠字。
         """
         # 窗口还没真正布局出来时 winfo_width() 会返回 1。
         # 这时**先不画**，等下一帧再画——否则会把内容按 80px 折行，
-        # 折出来的排版是错的（而且已经被缓存，宽度变了才会重排）。
+        # 折出来的排版是错的。
         raw_w = self.canvas.winfo_width()
         if raw_w <= 8:
             self.canvas.update_idletasks()
@@ -188,22 +199,15 @@ class TranscriptView:
         self._pending_rows = None
 
         cw = max(80, raw_w)
-        if cw != self._width_seen:
-            # 宽度变了（用户拉伸窗口）→ 全部重排
-            self._clear()
-            self._width_seen = cw
+        pad = 10
+        inner = max(60, cw - pad * 2 - 8)
 
-        self._viewport_h = max(1, self.canvas.winfo_height())
-        self._total_h = self._content_h
-
-        seen: set[int] = set()
+        # ---- 第一遍：算出每一块的内容与高度 ----
+        blocks: list[tuple[float, str, list[str], str, list[str], bool, int]] = []
         live_sid = rows[-1].sid if rows else -1
-
         y = 0
         for line in rows:
-            seen.add(line.sid)
             is_live = (line.sid == live_sid) and not line.final
-
             if line.failed:
                 tcolor = COLOR_TARGET_FAIL
             elif is_live:
@@ -216,121 +220,97 @@ class TranscriptView:
             if not translated and not source:
                 continue
 
-            # 内容签名：没变就不动这一行
-            sig = (translated, source, tcolor, is_live)
-            info = self._rendered.get(line.sid)
-            if info is not None and info.get("sig") == sig:
-                y = info["top"] + info["height"]
-                continue
+            t_rows = self._wrap(translated, self.f_target, inner) if translated else []
+            s_rows = self._wrap(source, self.f_source, inner) if source else []
+            h = self._measure(t_rows, s_rows)
+            blocks.append((y, translated, t_rows, tcolor, s_rows, is_live, h))
+            y = int(y + h)
 
-            if info is not None:
-                # 内容变了：删掉重画（同一行原地更新）
-                for it in info["items"]:
-                    self.canvas.delete(it)
-                y = info["top"]
+        total = max(y, 1)
 
-            block_h = self._draw_block(y, translated, source, tcolor, is_live, cw)
-            self._rendered[line.sid] = {
-                "top": y,
-                "height": block_h,
-                "items": self._last_item_ids,
-                "sig": sig,
-            }
-            if line.sid not in self._order:
-                self._order.append(line.sid)
-            y += block_h
+        # ---- 第二遍：全量重绘 ----
+        self.canvas.delete("all")
+        self._rendered.clear()
+        self._order.clear()
+        self._placeholder_ids.clear()
 
-        # 清掉已经不在列表里的（历史超出上限被裁掉的）
-        for sid in [s for s in self._order if s not in seen]:
-            info = self._rendered.pop(sid, None)
-            if info:
-                for it in info["items"]:
-                    self.canvas.delete(it)
-            try:
-                self._order.remove(sid)
-            except ValueError:
-                pass
-
-        self._content_h = max(y, 1)
-
-        # 一行内容都没有时给个提示，不然用户看到黑框会以为坏了
-        if self._content_h <= 1 and not self._rendered:
+        if not blocks:
+            # 一行内容都没有时给个提示，不然用户看到黑框会以为坏了
+            self._content_h = 1
             self.canvas.configure(scrollregion=(0, 0, cw, 40))
-            if not self._placeholder_ids:
-                self._placeholder_ids.append(
-                    self.canvas.create_text(
-                        14, 12,
-                        text="等待声音…（请确认直播正在播放，且有说话声）",
-                        font=self.f_source,
-                        fill=COLOR_TEXT_DIM,
-                        anchor="nw",
-                    )
+            self._placeholder_ids.append(
+                self.canvas.create_text(
+                    14, 12,
+                    text="等待声音…（请确认直播正在播放，且有说话声）",
+                    font=self.f_source,
+                    fill=COLOR_TEXT_DIM,
+                    anchor="nw",
                 )
-        elif self._placeholder_ids:
-            for it in self._placeholder_ids:
-                self.canvas.delete(it)
-            self._placeholder_ids.clear()
+            )
+            return
 
-        self.canvas.configure(scrollregion=(0, 0, cw, self._content_h + 8))
+        for top, translated, t_rows, tcolor, s_rows, is_live, h in blocks:
+            self._paint_block(int(top), t_rows, tcolor, s_rows, is_live, cw, inner)
+
+        self._content_h = total
+        self.canvas.configure(scrollregion=(0, 0, cw, total + 8))
 
         if self.auto_scroll and not self._user_scrolled:
             self.scroll_to_bottom()
 
     # ------------------------------------------------------------------
-    def _draw_block(
-        self, top: int, translated: str, source: str, tcolor: str, is_live: bool, width: int
-    ) -> int:
-        """画一组（译文 + 原文），返回占用高度。"""
-        self._last_item_ids: list[int] = []
+    def _measure(self, t_rows: list[str], s_rows: list[str]) -> float:
+        """算一块（译文若干行 + 原文若干行）需要多高。"""
+        h = 4.0
+        if t_rows:
+            h += len(t_rows) * (self.f_target.metrics("linespace") + 2)
+        if s_rows:
+            h += 2 + len(s_rows) * (self.f_source.metrics("linespace") + 2)
+        return h + 6
+
+    def _paint_block(
+        self,
+        top: int,
+        t_rows: list[str],
+        tcolor: str,
+        s_rows: list[str],
+        is_live: bool,
+        width: int,
+        inner: int,
+    ) -> None:
+        """按算好的行内容绘制一块。"""
         pad = 10
-        inner = max(60, width - pad * 2 - 8)
         y = top + 4
 
         if self.show_panel:
             bg = self.bg_live if is_live else self.bg
-            # 两种半透明做法：
-            #   opaque_bg=True  → 底板纯色、窗口用 -alpha 统一半透明（桌面歌词效果）
-            #   opaque_bg=False → 底板用点阵 stipple 虚化，文字保持完全不透明
-            rect = self.canvas.create_rectangle(
-                pad,
-                top,
-                width - pad,
-                top + 1,          # 高度稍后按内容修正
-                fill=bg,
-                outline="",
+            self.canvas.create_rectangle(
+                pad, top + 1, width - pad, top + self._measure(t_rows, s_rows) - 2,
+                fill=bg, outline="",
                 stipple="" if self.opaque_bg else "gray50",
             )
-            self._last_item_ids.append(rect)
-        else:
-            rect = None
 
-        # 译文
-        if translated:
-            for row in self._wrap(translated, self.f_target, inner):
-                self._outlined_text(pad + 6, y, row, self.f_target, tcolor)
-                y += self.f_target.metrics("linespace") + 2
+        for row in t_rows:
+            self._outlined_text(pad + 6, y, row, self.f_target, tcolor)
+            y += self.f_target.metrics("linespace") + 2
 
-        # 原文（小字）
-        if source:
+        if s_rows:
             scolor = COLOR_SOURCE_DIM if is_live else COLOR_SOURCE
             y += 2
-            for row in self._wrap(source, self.f_source, inner):
+            for row in s_rows:
                 self._outlined_text(pad + 6, y, row, self.f_source, scolor)
                 y += self.f_source.metrics("linespace") + 2
 
-        y += 6
-        if rect is not None:
-            self.canvas.coords(rect, pad, top + 1, width - pad, y - 2)
-        return max(8, y - top)
-
     def _outlined_text(self, x: int, y: int, text: str, font: tkfont.Font, color: str) -> None:
+        """画一遍描边、再画一遍填充。
+
+        描边是 8 个方向的黑色副本：直播画面明暗不定，没有描边的白字经常读不清。
+        """
         for dx, dy in _OUTLINE_OFFSETS:
-            self._last_item_ids.append(
-                self.canvas.create_text(x + dx, y + dy, text=text, font=font, fill=OUTLINE, anchor="nw")
+            self.canvas.create_text(
+                x + dx, y + dy, text=text, font=font, fill=OUTLINE, anchor="nw"
             )
-        self._last_item_ids.append(
-            self.canvas.create_text(x, y, text=text, font=font, fill=color, anchor="nw")
-        )
+        self.canvas.create_text(x, y, text=text, font=font, fill=color, anchor="nw")
 
     # ------------------------------------------------------------------
     def _wrap(self, text: str, font: tkfont.Font, width: int) -> list[str]:
