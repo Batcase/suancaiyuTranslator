@@ -150,10 +150,13 @@ class TranslatorService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
-                // 1) 先起前台通知 —— 必须在碰 MediaProjection 之前
-                startForegroundCompat()
-
                 val useMic = intent?.getBooleanExtra(EXTRA_USE_MIC, false) ?: false
+
+                // 1) 先起前台通知 —— 必须在碰 MediaProjection 之前。
+                //    注意类型要按模式传：内录用 MEDIA_PROJECTION，麦克风用 MICROPHONE。
+                //    （混着传会因为缺 RECORD_AUDIO 而抛 SecurityException）
+                startForegroundCompat(useMic)
+
                 if (useMic) {
                     startWithMic()
                 } else {
@@ -175,32 +178,60 @@ class TranslatorService : Service() {
 
     // ---------------------------------------------------------------
 
-    private fun startForegroundCompat() {
+    /**
+     * 启动前台服务。
+     *
+     * ★ `foregroundServiceType` 必须**和当前实际用途一致**，不能一股脑全带上。
+     *
+     * 这里踩过一个很隐蔽的坑：原来无论哪种模式都写成
+     * `MEDIA_PROJECTION | MICROPHONE`。而 `MICROPHONE` 类型要求
+     * **`RECORD_AUDIO` 已被授予** —— 可走"内录"时我们从来没申请过录音权限
+     * （内录走的是 MediaProjection，不需要麦克风权限）。
+     * 结果 Android 14 直接抛 `SecurityException`，用户看到的就是
+     * "启动失败：SecurityException"，而且完全猜不到原因。
+     *
+     * 修正：按模式传对应类型。
+     */
+    private fun startForegroundCompat(useMic: Boolean) {
         val notification = buildNotification(paused = false)
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceCompat.startForeground(
-                    this,
-                    NOTIF_ID,
-                    notification,
+                val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                     // Android 14 起必须与清单里声明的类型一致
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
-                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    if (useMic) {
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
                     } else {
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                    },
-                )
+                    }
+                } else {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                }
+                ServiceCompat.startForeground(this, NOTIF_ID, notification, fgsType)
             } else {
                 startForeground(NOTIF_ID, notification)
             }
             setRunning(true)
         } catch (t: Throwable) {
-            // 最常见原因：没有 FOREGROUND_SERVICE_MEDIA_PROJECTION 权限，或没拿到投影授权
             Log.e(TAG, "startForeground 失败", t)
-            fail("前台服务启动失败：${t.javaClass.simpleName}")
+            // SecurityException 的消息里会写明缺哪个权限，必须带上
+            fail("前台服务启动失败：${describe(t)}")
             stopEverything()
         }
+    }
+
+    /**
+     * 把异常转成一句人能看懂的原因。
+     *
+     * 为什么不能只写 `t.javaClass.simpleName`：Android 的 SecurityException
+     * 消息里明确写了**缺哪个权限**，例如
+     * `Permission Denial: startForeground from ... requires
+     *  android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION`。
+     * 只显示"SecurityException"等于把唯一有用的线索扔了（用户实测就遇到这个）。
+     */
+    private fun describe(t: Throwable): String {
+        val msg = t.message?.replace('\n', ' ')?.trim().orEmpty()
+        return if (msg.isEmpty()) t.javaClass.simpleName
+        else "${t.javaClass.simpleName} - ${msg.take(160)}"
     }
 
     private fun startWithProjection(resultCode: Int, data: Intent) {
@@ -228,7 +259,8 @@ class TranslatorService : Service() {
             subtitleStore.setState(RunState.STARTING, "正在启动内录…")
             val ok = capture.openPlayback(p)
             if (!ok) {
-                fail("内录打开失败，请重试或改用麦克风模式")
+                // 带上具体原因（SecurityException 会写明缺哪个权限）
+                fail("内录打开失败：${capture.playbackError}（可改用麦克风模式）")
                 stopEverything()
                 return
             }
@@ -236,7 +268,7 @@ class TranslatorService : Service() {
             afterCaptureReady()
         } catch (t: Throwable) {
             Log.e(TAG, "启动投射失败", t)
-            fail("启动失败：${t.javaClass.simpleName}")
+            fail("启动失败：${describe(t)}")
             stopEverything()
         }
     }
@@ -245,7 +277,9 @@ class TranslatorService : Service() {
         subtitleStore.setState(RunState.STARTING, "正在启动麦克风…")
         val ok = capture.openMic()
         if (!ok) {
-            fail("麦克风打开失败（检查录音权限）")
+            // openMic 内部已经吞掉了异常细节，这里把"可能是权限"说清楚，
+            // 并提示去看日志（logcat 里有完整堆栈）
+            fail("麦克风打开失败（确认已授予录音权限；详见 adb logcat -s AudioCapture）")
             stopEverything()
             return
         }

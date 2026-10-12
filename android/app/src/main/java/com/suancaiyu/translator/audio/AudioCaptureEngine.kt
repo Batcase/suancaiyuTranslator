@@ -170,8 +170,18 @@ class AudioCaptureEngine(private val scope: CoroutineScope) {
         }
 
         Log.e(TAG, "内录全部尝试失败", lastError)
+        // 把失败原因留给上层显示 —— 不然界面只能看到一句"内录打开失败"，
+        // 而真正有用的是 SecurityException 消息里写的"缺哪个权限"。
+        playbackError = lastError?.let {
+            "${it.javaClass.simpleName}${it.message?.let { m -> " - ${m.take(140)}" } ?: ""}"
+        } ?: "未知原因"
         return false
     }
+
+    /** 上一次 openPlayback 失败的原因（供界面显示） */
+    @Volatile
+    var playbackError: String = ""
+        private set
 
     /** 供日志/界面排查用：实际生效的是哪档配置 */
     @Volatile
