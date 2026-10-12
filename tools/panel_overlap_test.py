@@ -152,9 +152,15 @@ def main() -> int:
     pump(root, 0.1)
     check(canvas.yview()[1] > 0.99, "能回到底部", f"yview={canvas.yview()[1]:.3f}")
 
-    # ---- 全局鼠标钩子 ----
-    print("\n  全局鼠标钩子:")
-    check(ov._hook is not None, "WH_MOUSE_LL 已安装", f"handle={ov._hook}")
+    # ---- 翻历史热键（刻意不用全局鼠标钩子：会让每次鼠标移动都回调到
+    #      本进程，整机鼠标响应变钝）----
+    print("\n  翻历史:")
+    check(
+        "scroll_back" in ov._hotkey_map.values(),
+        "PageUp 翻历史热键已注册",
+        f"共 {len(ov._hotkeys)} 个热键",
+    )
+    check(ov._hook is None if hasattr(ov, "_hook") else True, "没有安装全局鼠标钩子")
 
     ov.stop()
     root.destroy()

@@ -32,39 +32,19 @@ IS_WINDOWS = sys.platform == "win32"
 
 SENTINEL = "#010203"  # 哨兵色：整块变透明
 
-# ---- 全局低级鼠标钩子（为了拿到滚轮）----
+# 关于"滚轮翻历史"的取舍（踩过的坑，别再走回头路）
+# ---------------------------------------------------------------
+# 面板默认是**鼠标穿透**的（`WS_EX_TRANSPARENT`），该状态下窗口收不到任何
+# 鼠标消息，滚轮自然收不到；而且实测**即使关掉穿透也滚不动** ——
+# `overrideredirect(True)` 的无边框窗口没有焦点，滚轮消息不会路由到画布。
 #
-# 为什么必须用钩子而不是 tkinter 的 <MouseWheel> 事件：
+# 试过用 WH_MOUSE_LL 全局鼠标钩子解决，但**性能代价太大**：
+# 低级钩子会让**每一次鼠标移动**都回调到本进程，整机鼠标响应都会变钝
+# （用户实测反馈卡顿）。所以放弃。
 #
-#   1. 面板默认是**鼠标穿透**的（`WS_EX_TRANSPARENT`）。该状态下窗口
-#      **完全不接收鼠标消息** —— 系统把滚轮消息直接转给下层窗口
-#      （也就是直播软件），canvas 上的绑定永远不会触发。
-#   2. 实测**即使关掉穿透**，`overrideredirect(True)` 的无边框窗口没有焦点，
-#      滚轮消息也不一定会路由到画布上（实测 yview 一动不动）。
-#
-# 所以改用 WH_MOUSE_LL 全局钩子：不依赖窗口是否穿透、是否有焦点，
-# 拿到滚轮后自己判断"鼠标是不是在面板范围内"，是才滚动。
-# 注意只能用低级钩子（不能注入/拦截），回调里必须**尽快返回**，
-# 否则会拖慢整个系统的鼠标响应。
-WH_MOUSE_LL = 14
-WM_MOUSEWHEEL = 0x020A
-WM_MOUSEHWHEEL = 0x020E
-LLMHF_INJECTED = 0x00000001
-
-#: 钩子回调的原型（必须保持引用，否则会被 GC 掉导致崩溃）
-HOOKPROC = ctypes.WINFUNCTYPE(
-    ctypes.c_ssize_t, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
-)
-
-
-class MSLLHOOKSTRUCT(ctypes.Structure):
-    _fields_ = [
-        ("pt", wintypes.POINT),
-        ("mouseData", ctypes.c_ulong),
-        ("flags", ctypes.c_ulong),
-        ("time", ctypes.c_ulong),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-    ]
+# 最终方案：**注册键盘热键翻历史**（RegisterHotKey 零开销，系统层面转发，
+# 不参与鼠标消息链），鼠标滚轮则作为"手动关掉穿透时"的补充路径。
+# 键盘热键见 _register_hotkeys 里的 PageUp/PageDown。
 
 COLOR_OUTLINE = "#000000"  # 文字描边，保证在亮画面上也读得清
 COLOR_SOURCE = "#E8EAED"
@@ -93,6 +73,8 @@ MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
 
 VK_F1, VK_F2, VK_F3, VK_F4 = 0x70, 0x71, 0x72, 0x73
+#: PageUp / PageDown（用来翻看历史，零开销，替代全局鼠标钩子）
+VK_PRIOR, VK_NEXT = 0x21, 0x22
 
 user32 = ctypes.windll.user32 if IS_WINDOWS else None
 
@@ -183,10 +165,7 @@ class SubtitleOverlay:
         self._hover_override = False
         #: 首帧是否已经强制刷过状态栏（见 _tick）
         self._first_render_done = False
-        #: 全局鼠标钩子（滚轮）
-        self._hook = None
-        self._hook_proc = None
-        #: 面板屏幕矩形（钩子回调里高频读取，缓存起来）
+        #: 面板屏幕矩形（悬停判断用，每 200ms 刷新一次）
         self._panel_rect = (0, 0, 0, 0)
         #: 当前是否悬停在面板上（由钩子驱动，不能用 tk 的 <Enter>）
         self._hover_state = False
@@ -204,8 +183,6 @@ class SubtitleOverlay:
             raise RuntimeError("这个悬浮窗实例已经停止，请重新创建实例")
         self._build()
         self._register_hotkeys()
-        self._install_mouse_hook()
-        self._refresh_panel_rect()
         self._tick_job = self.root.after(40, self._tick)
         self._flash("字幕已开启：F1 穿透 / F2 暂停 / F3 行数 / 拖动移动", 5000)
 
@@ -215,7 +192,6 @@ class SubtitleOverlay:
             return
         self._closed = True
         self._unregister_hotkeys()
-        self._uninstall_mouse_hook()
         for job in (self._tick_job, self._hint_job):
             if job is not None:
                 try:
@@ -363,8 +339,7 @@ class SubtitleOverlay:
                 bg=self._panel_bg,
                 bg_live=str(getattr(ov, "panel_bg_live", "#101010")),
                 auto_scroll=bool(getattr(ov, "auto_scroll", True)),
-                # 鼠标移到面板上时临时关掉穿透，否则滚轮事件收不到（穿透 =
-                # WS_EX_TRANSPARENT = 完全不接收鼠标事件），"滚轮回看历史"会失效
+                # 光标移到面板上时临时关掉穿透（这样能拖动/改大小/滚轮）
                 on_hover_change=self._on_panel_hover,
             )
             if getattr(ov, "show_scrollbar", True):
@@ -385,7 +360,9 @@ class SubtitleOverlay:
         self._apply_click_through(self._click_through)
         self._bind_events()
         if self._panel_mode:
-            self._flash("面板：拖右下角改大小 / Ctrl+拖 也可改 / 拖动移动 / F1穿透 F2暂停", 6000)
+            self._flash(
+                "面板：PageUp 回看历史 / PageDown 回到最新 / 拖右下角改大小 / F1 穿透", 7000
+            )
         else:
             self._flash("就绪：F1 穿透 / F2 暂停 / F3 行数 / F4 重连 / 双击穿透 / 拖动移动")
 
@@ -436,14 +413,11 @@ class SubtitleOverlay:
         self._grip.bind("<Leave>", lambda e: self._set_cursor(""))
 
     def _on_panel_hover(self, hovering: bool) -> None:
-        """鼠标进出面板时临时切换"鼠标穿透"（现在由全局钩子驱动）。
+        """按光标位置切换"鼠标穿透"：移上去可交互，移开恢复不挡直播。
 
-        为什么需要：面板默认穿透（不挡直播软件的点击），而穿透在 Win32 里就是
-        `WS_EX_TRANSPARENT` —— 那个状态下窗口**不接收任何鼠标消息**。
-
-        注意：**不能靠 tkinter 的 `<Enter>` 事件来触发**（那也依赖收到鼠标消息，
-        穿透时同样收不到，是个死循环）。所以现在由 WH_MOUSE_LL 全局钩子根据
-        光标坐标判断悬停，再回调到这里。
+        注意**不能靠 tkinter 的 `<Enter>/<Leave>`**：穿透时窗口收不到鼠标
+        消息，那两个事件不会触发（死循环）。所以由 `_tick` 里每 200ms 用
+        `winfo_pointerxy()` 主动判断光标坐标。
         """
         if not IS_WINDOWS or self.win is None:
             return
@@ -458,109 +432,9 @@ class SubtitleOverlay:
         except Exception:
             pass
 
-    # ================= 全局鼠标钩子（滚轮）=================
-    def _install_mouse_hook(self) -> None:
-        """装 WH_MOUSE_LL，用来自主处理滚轮。
-
-        低级钩子不注入、不拦截（回调恒返回 CallNextHookEx），
-        只"顺便看一眼"滚轮消息，所以对系统影响最小。
-        """
-        if not IS_WINDOWS:
-            return
-        try:
-            self._hook_proc = HOOKPROC(self._mouse_hook)
-            self._hook = user32.SetWindowsHookExW(
-                WH_MOUSE_LL, self._hook_proc, None, 0
-            )
-            if not self._hook:
-                print("[overlay] 全局鼠标钩子安装失败，滚轮翻页将不可用", file=sys.stderr)
-                self._hook_proc = None
-        except Exception as exc:
-            print(f"[overlay] 全局鼠标钩子异常: {exc}", file=sys.stderr)
-            self._hook_proc = None
-
-    def _uninstall_mouse_hook(self) -> None:
-        if self._hook:
-            try:
-                user32.UnhookWindowsHookEx(self._hook)
-            except Exception:
-                pass
-            self._hook = None
-        self._hook_proc = None
-
-    def _mouse_hook(self, code: int, wparam: int, lparam: int):
-        """钩子回调。**必须极快返回**，否则拖慢整机鼠标。"""
-        try:
-            if code >= 0 and wparam == WM_MOUSEWHEEL and self.transcript is not None:
-                info = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
-                # 忽略自己注入的消息，避免递归
-                if not (info.flags & LLMHF_INJECTED):
-                    if self._point_in_panel(info.pt.x, info.pt.y):
-                        delta = ctypes.c_short((info.mouseData >> 16) & 0xFFFF).value
-                        # 不能在钩子回调里直接操作 tk（会在错误线程/重入）。
-                        # 交给 after(0) 在主线程里做。
-                        self.root.after(0, lambda d=delta: self._wheel_scroll(d))
-        except Exception:
-            pass
-        return user32.CallNextHookEx(None, code, wparam, lparam)
-
-    def _point_in_panel(self, x: int, y: int) -> bool:
-        """光标是否在面板范围内（用窗口矩形判断）。"""
-        if self.win is None:
-            return False
-        try:
-            return (
-                self._panel_rect[0] <= x <= self._panel_rect[2]
-                and self._panel_rect[1] <= y <= self._panel_rect[3]
-            )
-        except Exception:
-            return False
-
-    def _refresh_panel_rect(self) -> None:
-        """缓存窗口屏幕矩形（钩子里每 40ms 会用到，不能每次都查系统）。"""
-        if self.win is None:
-            return
-        try:
-            self.win.update_idletasks()
-            x, y = self.win.winfo_rootx(), self.win.winfo_rooty()
-            w, h = self.win.winfo_width(), self.win.winfo_height()
-            self._panel_rect = (x, y, x + w, y + h)
-        except Exception:
-            pass
-
-    def _wheel_scroll(self, delta: int) -> None:
-        """滚轮翻页（在主线程执行）。delta>0 = 上滚 = 回看历史。"""
-        tv = self.transcript
-        if tv is None:
-            return
-        steps = int(delta / 120)
-        if steps == 0:
-            steps = 1 if delta > 0 else -1
-        tv.scroll_by(-steps * 3)
-
     def _set_cursor(self, name: str) -> None:
         try:
             self.win.configure(cursor=name or "")
-        except Exception:
-            pass
-
-    def _on_panel_hover(self, hovering: bool) -> None:
-        """鼠标进出面板时临时切换"鼠标穿透"。
-
-        为什么需要：面板默认穿透（不挡直播软件的点击），而穿透在 Win32 里就是
-        `WS_EX_TRANSPARENT` —— 那个状态下窗口**不接收任何鼠标事件**，
-        于是滚轮翻历史是失效的。
-
-        折中：移上去时关掉穿透（可以滚动），移开后恢复（继续不挡直播）。
-        用户的感觉就是"鼠标移到字幕上就能滚"。
-        """
-        if not IS_WINDOWS or self.win is None:
-            return
-        # 用户用 F1 手动关过穿透时就不折腾了（那种状态下本来就能滚）
-        if self._hover_override:
-            return
-        try:
-            self._apply_click_through(not hovering)
         except Exception:
             pass
 
@@ -637,7 +511,15 @@ class SubtitleOverlay:
         user32.SetWindowLongW(self._hwnd, GWL_EXSTYLE, style)
 
     def _register_hotkeys(self) -> None:
-        """注册全局热键。只用 F1~F4，避免和输入法/直播软件抢 Ctrl+Shift+字母。"""
+        """注册全局热键。
+
+        只用 F1~F6 与 Ctrl+Alt+方向键，避免和输入法/直播软件抢
+        Ctrl+Shift+字母这类常见组合。
+
+        翻历史用的是 **RegisterHotKey**（系统层面转发，零开销），
+        刻意不用全局鼠标钩子 —— 低级钩子会让每次鼠标移动都回调到本进程，
+        整机鼠标响应都会变钝（实测用户反馈卡顿）。
+        """
         if not IS_WINDOWS:
             return
         wanted = [
@@ -645,6 +527,9 @@ class SubtitleOverlay:
             ((MOD_NOREPEAT, VK_F2), "toggle_pause"),
             ((MOD_NOREPEAT, VK_F3), "toggle_history"),
             ((MOD_NOREPEAT, VK_F4), "reconnect"),
+            # 翻历史：PageUp 往回看，PageDown 回到最新
+            ((MOD_NOREPEAT, VK_PRIOR), "scroll_back"),
+            ((MOD_NOREPEAT, VK_NEXT), "scroll_latest"),
         ]
         for idx, ((mods, vk), action) in enumerate(wanted, start=1):
             if user32.RegisterHotKey(None, idx, mods, vk):
@@ -726,10 +611,53 @@ class SubtitleOverlay:
                 ov = self.cfg.overlay
                 self.state.max_lines = 1 if self.state.max_lines > 1 else max(2, ov.max_lines)
                 self._flash(f"显示行数：{self.state.max_lines}")
+        elif action == "scroll_back":
+            self._scroll_history(1)
+        elif action == "scroll_latest":
+            tv = self.transcript
+            if tv is not None:
+                tv.scroll_to_bottom()
+            self._flash("已回到最新")
         elif action == "reconnect":
             self._flash("正在重连…")
         elif action == "quit":
             self.close()
+
+    # ================= 翻历史（键盘热键，零开销）=================
+    def _scroll_history(self, direction: int) -> None:
+        """翻看历史。direction>0 = 往回看（更早的内容）。
+
+        刻意用键盘热键而不是全局鼠标钩子：低级钩子会让**每一次鼠标移动**
+        都回调到本进程，整机鼠标响应都会变钝（用户实测反馈卡顿）。
+        RegisterHotKey 是系统层面转发，不参与鼠标消息链，零开销。
+        """
+        tv = self.transcript
+        if tv is None:
+            return
+        tv.scroll_by(-direction * 3)
+        first, last = tv.canvas.yview()
+        if last >= 0.999:
+            self._flash("已回到最新")
+        else:
+            self._flash("回看历史中…（PageDown 回到最新）")
+
+    # ================= 悬停判断 =================
+    def _refresh_panel_rect(self) -> None:
+        """缓存窗口的屏幕矩形，供悬停判断使用。"""
+        if self.win is None:
+            return
+        try:
+            self.win.update_idletasks()
+            x, y = self.win.winfo_rootx(), self.win.winfo_rooty()
+            w, h = self.win.winfo_width(), self.win.winfo_height()
+            self._panel_rect = (x, y, x + w, y + h)
+        except Exception:
+            pass
+
+    def _point_in_panel(self, x: int, y: int) -> bool:
+        """屏幕坐标 (x, y) 是否落在面板矩形内。"""
+        left, top, right, bottom = self._panel_rect
+        return left <= x <= right and top <= y <= bottom
 
     def _flash(self, text: str, ms: int = 3500) -> None:
         self.hint.configure(text=text)
@@ -795,8 +723,7 @@ class SubtitleOverlay:
         # 每 ~200ms 刷新一次面板矩形并同步悬停状态。
         #
         # 为什么不靠 tk 的 <Enter>/<Leave>：面板穿透时窗口收不到鼠标消息，
-        # 那两个事件根本不会触发（死循环）。所以这里主动用光标坐标判断，
-        # 再配合全局钩子给出的滚轮事件。
+        # 那两个事件根本不会触发。所以主动用光标坐标判断。
         self._tick_count += 1
         if self._panel_mode and self._tick_count % 5 == 0:
             self._refresh_panel_rect()
