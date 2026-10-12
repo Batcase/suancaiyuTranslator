@@ -111,6 +111,8 @@ IID_IPropertyStore = GUID("{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}")
 IID_ISimpleAudioVolume = GUID("{87CE5498-68D6-44E5-9215-6DA47EF883D8}")
 
 PKEY_Device_FriendlyName = (14, GUID("{A45C254E-DF1C-4EFD-8020-67D146A850E0}"), 14)
+#: OpenPropertyStore 的访问模式。0 = STGM_READ（只读）
+STGM_READ = 0
 
 # 默认播放设备角色
 eConsole, eMultimedia, eCommunications = 0, 1, 2
@@ -267,25 +269,33 @@ def _create_enumerator() -> c_void_p:
 
 
 def _device_friendly_name(dev: c_void_p) -> str:
-    """尽力读取设备友好名。
+    """读取设备友好名（如"扬声器 (Realtek Audio)"、"耳机 (WH-1000XM4)"）。
 
-    注意：IPropertyStore 在 ctypes 下无法安全调用——把 stgmAccess 直接按值
-    传入会触发访问违例（本机实测），因此这里默认不做属性查询，只保留一个
-    可选的开关。设备名对功能没有影响：字幕上显示的采样率/声道数已经足够
-    排错，Android 端也只会用默认输出设备。
+    这里曾经有个**很隐蔽的错误**：调用 OpenPropertyStore 时用了 vtable 索引 5。
+    但 IMMDevice 的接口顺序是：
 
-    设置环境变量 LIVESUB_TRY_DEVICE_NAME=1 可以尝试读取（失败则静默回退）。
+        0 QueryInterface / 1 AddRef / 2 Release
+        3 Activate / 4 OpenPropertyStore / 5 GetId
+
+    索引 5 其实是 **GetId**，参数类型完全不匹配 → 访问违例（整个进程崩掉）。
+    所以这个功能被注释掉了，界面只能显示"(未知设备)"。
+
+    后果在"有多个输出设备"时特别严重：用户插着耳机、默认设备是耳机时，
+    界面上所有设备都叫"(未知设备)"，**根本没法选**，也就没法排查
+    "插耳机就采不到声音"这类问题。
+
+    修正为索引 4 后即可正常读取。仍用 try 包住：万一某个设备属性异常，
+    只影响名字显示，绝不能让整个采集崩掉。
     """
-    if os.getenv("LIVESUB_TRY_DEVICE_NAME", "") not in ("1", "true", "yes"):
-        return ""
     store = _out_ptr()
-    hr = _vt(dev, 4, ctypes.c_long, POINTER(GUID), ctypes.c_ulong, POINTER(c_void_p))(
-        dev, byref(IID_IPropertyStore), 0, byref(store)
+    # ★ 索引 4 = OpenPropertyStore（不是 5）
+    hr = _vt(dev, 4, ctypes.c_long, ctypes.c_ulong, POINTER(c_void_p))(
+        dev, STGM_READ, byref(store)
     )
     if hr < 0 or not store:
         return ""
     try:
-        # PROPERTYKEY 是 (GUID fmtid; DWORD pid)，总共 20 字节，必须按值传结构体
+        # PROPERTYKEY 是 (GUID fmtid; DWORD pid)，按值传结构体
         class PROPERTYKEY(ctypes.Structure):
             _fields_ = [("fmtid", GUID), ("pid", ctypes.c_ulong)]
 
@@ -294,6 +304,7 @@ def _device_friendly_name(dev: c_void_p) -> str:
         pkey.pid = PKEY_Device_FriendlyName[2]
 
         pv = PROPVARIANT()
+        # IPropertyStore: 0 QI / 1 AddRef / 2 Release / 3 GetCount / 4 GetAt / 5 GetValue
         res = _vt(store, 5, ctypes.c_long, POINTER(PROPERTYKEY), POINTER(PROPVARIANT))(
             store, byref(pkey), byref(pv)
         )

@@ -217,6 +217,25 @@ class TranscriptView:
                 pass
 
         self._content_h = max(y, 1)
+
+        # 一行内容都没有时给个提示，不然用户看到黑框会以为坏了
+        if self._content_h <= 1 and not self._rendered:
+            self.canvas.configure(scrollregion=(0, 0, cw, 40))
+            if not self._placeholder_ids:
+                self._placeholder_ids.append(
+                    self.canvas.create_text(
+                        14, 12,
+                        text="等待声音…（请确认直播正在播放，且有说话声）",
+                        font=self.f_source,
+                        fill=COLOR_TEXT_DIM,
+                        anchor="nw",
+                    )
+                )
+        elif self._placeholder_ids:
+            for it in self._placeholder_ids:
+                self.canvas.delete(it)
+            self._placeholder_ids.clear()
+
         self.canvas.configure(scrollregion=(0, 0, cw, self._content_h + 8))
 
         if self.auto_scroll and not self._user_scrolled:

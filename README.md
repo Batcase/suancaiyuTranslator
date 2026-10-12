@@ -344,6 +344,73 @@ python tools\panel_test.py
 
 ---
 
+## 1.8 插耳机/多输出设备时怎么排查（设备名与逐设备探测）
+
+### 一个曾经很严重的缺陷：设备名读不出来
+
+界面上的设备列表以前**全部显示 `(未知设备)`**。原因是读取设备友好名时
+调错了 COM 接口的 vtable 索引：
+
+```
+IMMDevice 的接口顺序：
+  0 QueryInterface / 1 AddRef / 2 Release
+  3 Activate / 4 OpenPropertyStore / 5 GetId
+```
+
+代码用了索引 **5**（其实想调 4），于是调到了 **`GetId`**，参数类型不匹配 →
+访问违例、整个进程崩掉。当年为了不崩就把这个功能注释掉了。
+
+后果在"有多个输出设备"时特别严重（比如**插着耳机**）：
+
+```
+    (未知设备)          ← 哪个是耳机？哪个是显示器？完全看不出来
+  * (未知设备)
+    (未知设备)
+```
+
+用户根本无从选择，也就没法排查"插耳机就采不到声音"这类问题。修正为索引 4 后：
+
+```
+    Realtek Digital Output (Realtek High Definition Audio)
+    DELL E2424HS (NVIDIA High Definition Audio)
+  * Realtek HD Audio 2nd output (Realtek High Definition Audio)    ← 默认
+    DELL E2424HS (NVIDIA High Definition Audio)
+```
+
+### 逐设备探测：哪个设备真的能采到声音
+
+WASAPI 回环是**跟着某个播放设备走**的 —— 回环只反映该设备正在播放的内容。
+所以"换了个输出设备就没声音"是很常见的情况。
+
+更隐蔽的是：`IAudioClient::Initialize` 可能**成功**，但读出来全是静音。
+只看"打开成功"判断不出来，必须量实际电平：
+
+```powershell
+# 先让目标设备真的在放声音（视频/音乐，别停），再跑：
+python tools\loopback_probe.py 5
+
+# 想知道问题出在哪一层（原生回环 / 转换层 / 设备选择）：
+python tools\loopback_layers.py 4
+```
+
+输出会直接告诉你每个设备的实测峰值：
+
+```
+[0] 测 Realtek HD Audio 2nd output … ✅ 有声音  peak=0.4532
+[1] 测 Realtek Digital Output     … ❌ 全静音
+```
+
+**如果是"某个设备采不到"，就在配置里指定能采到的那个**（名字子串即可）：
+
+```toml
+[audio]
+device = "2nd output"      # 只要包含这段文字即匹配
+```
+
+> 说明：换设备后**必须重启翻译**才生效（回环是打开时绑定的）。
+
+---
+
 ## 2. 快速开始
 
 ### 2.1 装依赖
