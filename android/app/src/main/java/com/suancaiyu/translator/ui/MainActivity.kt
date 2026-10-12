@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings as SysSettings
 import android.text.InputType
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -68,9 +69,15 @@ class MainActivity : AppCompatActivity() {
         androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            startupNote = ""
             startServiceWithProjection(result.resultCode, result.data!!)
         } else {
-            toast("已取消录制授权，无法内录")
+            // ★ 不要只弹个一闪而过的 toast：用户会以为"点了没反应"。
+            //   记下来并**持久显示**在状态行上。
+            startupNote = "已取消录制授权，内录无法启动（可改用麦克风模式）"
+            Log.w(TAG, startupNote)
+            toast(startupNote)
+            refreshUi()
         }
     }
 
@@ -281,8 +288,20 @@ class MainActivity : AppCompatActivity() {
 
         // 启动内录（系统会弹"是否允许录制/投射"）
         val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        projectionLauncher.launch(mgr.createScreenCaptureIntent())
+        try {
+            projectionLauncher.launch(mgr.createScreenCaptureIntent())
+            // 说明白下一步该干什么 —— 不给提示的话用户会以为没反应
+            startButton.postDelayed({ toast("请在系统弹窗里选「立即开始」") }, 900)
+        } catch (t: Throwable) {
+            // 个别 ROM 上这个 Intent 可能因为缺少某个组件/权限而抛异常，
+            // 表现为"点了没任何反应"。把原因直接告诉用户。
+            toast("无法打开录制授权弹窗：${t.javaClass.simpleName}，请改用麦克风模式")
+            Log.e(TAG, "createScreenCaptureIntent 启动失败", t)
+        }
     }
+
+    /** 供日志过滤用 */
+    private val TAG = "MainActivity"
 
     private fun startServiceWithProjection(resultCode: Int, data: Intent) {
         val intent = Intent(this, TranslatorService::class.java).apply {
@@ -317,6 +336,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startServiceWithMic() {
+        startupNote = ""
         val intent = Intent(this, TranslatorService::class.java).apply {
             action = TranslatorService.ACTION_START
             putExtra(TranslatorService.EXTRA_USE_MIC, true)
@@ -326,7 +346,8 @@ class MainActivity : AppCompatActivity() {
         startButton.postDelayed({ refreshUi() }, 800)
     }
 
-    private fun onStopClicked() {        startService(
+    private fun onStopClicked() {
+        startService(
             Intent(this, TranslatorService::class.java).setAction(TranslatorService.ACTION_STOP)
         )
         startButton.postDelayed({ refreshUi() }, 400)
@@ -355,6 +376,15 @@ class MainActivity : AppCompatActivity() {
 
     private var collecting = false
 
+    /**
+     * 启动过程中的说明/失败原因，**持久显示**在状态行。
+     *
+     * 为什么需要：之前失败原因只在 toast 里一闪而过（或被服务里的
+     * `setState(IDLE, "")` 清掉），用户看到的就是"点了没反应 + 未启动"，
+     * 完全无从判断。现在把原因留住并显示出来。
+     */
+    private var startupNote: String = ""
+
     private fun refreshUi() {
         routeText.text = buildRouteText()
         refreshOverlayWarning()
@@ -362,7 +392,14 @@ class MainActivity : AppCompatActivity() {
         val running = TranslatorService.running
         startButton.isEnabled = !running
         stopButton.isEnabled = running
-        if (!running) statusText.text = getString(R.string.main_idle)
+        if (!running) {
+            // 没在跑：优先显示最近一次启动失败/被取消的原因，而不是干巴巴一句"未启动"。
+            // 用户反馈"没有任何提示、只显示未启动"就是这个原因。
+            statusText.text = startupNote.ifEmpty { getString(R.string.main_idle) }
+            statusText.setTextColor(
+                Color.parseColor(if (startupNote.isNotEmpty()) "#FFB020" else "#9AA0A6")
+            )
+        }
 
         // 订阅字幕状态。
         //

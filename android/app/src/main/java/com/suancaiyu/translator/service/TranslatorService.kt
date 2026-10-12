@@ -57,6 +57,22 @@ class TranslatorService : Service() {
     private var pipeline: TranslationPipeline? = null
     private var projection: MediaProjection? = null
 
+    /**
+     * 最近一次失败的原因。
+     *
+     * 为什么要单独记：`stopEverything()` 会把状态归零，如果不在外面留一份，
+     * 用户就只看到"未启动"，无从判断失败原因。界面在 IDLE/ERROR 时都优先显示它。
+     */
+    @Volatile
+    private var lastErrorText: String = ""
+
+    /** 记录错误：同时累加计数、写日志、并把原因留到界面能显示的地方。 */
+    private fun fail(reason: String) {
+        lastErrorText = reason
+        subtitleStore.bumpError(reason)
+        Log.w(TAG, "启动/运行失败：$reason")
+    }
+
     companion object {
         private const val TAG = "TranslatorService"
         private const val NOTIF_ID = 1001
@@ -146,7 +162,7 @@ class TranslatorService : Service() {
                     val data: Intent? = intent?.getParcelableExtra(EXTRA_RESULT_DATA)
                     if (data == null) {
                         Log.e(TAG, "缺少 MediaProjection 授权数据，无法启动")
-                        subtitleStore.bumpError("没有拿到录制授权")
+                        fail("没有拿到录制授权")
                         stopEverything()
                         return START_NOT_STICKY
                     }
@@ -182,7 +198,7 @@ class TranslatorService : Service() {
         } catch (t: Throwable) {
             // 最常见原因：没有 FOREGROUND_SERVICE_MEDIA_PROJECTION 权限，或没拿到投影授权
             Log.e(TAG, "startForeground 失败", t)
-            subtitleStore.bumpError("前台服务启动失败：${t.javaClass.simpleName}")
+            fail("前台服务启动失败：${t.javaClass.simpleName}")
             stopEverything()
         }
     }
@@ -192,7 +208,7 @@ class TranslatorService : Service() {
             val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             val p = mgr.getMediaProjection(resultCode, data)
             if (p == null) {
-                subtitleStore.bumpError("MediaProjection 获取失败（授权可能已失效）")
+                fail("MediaProjection 获取失败（授权可能已失效）")
                 stopEverything()
                 return
             }
@@ -212,7 +228,7 @@ class TranslatorService : Service() {
             subtitleStore.setState(RunState.STARTING, "正在启动内录…")
             val ok = capture.openPlayback(p)
             if (!ok) {
-                subtitleStore.bumpError("内录打开失败，请重试或改用麦克风模式")
+                fail("内录打开失败，请重试或改用麦克风模式")
                 stopEverything()
                 return
             }
@@ -220,7 +236,7 @@ class TranslatorService : Service() {
             afterCaptureReady()
         } catch (t: Throwable) {
             Log.e(TAG, "启动投射失败", t)
-            subtitleStore.bumpError("启动失败：${t.javaClass.simpleName}")
+            fail("启动失败：${t.javaClass.simpleName}")
             stopEverything()
         }
     }
@@ -229,7 +245,7 @@ class TranslatorService : Service() {
         subtitleStore.setState(RunState.STARTING, "正在启动麦克风…")
         val ok = capture.openMic()
         if (!ok) {
-            subtitleStore.bumpError("麦克风打开失败（检查录音权限）")
+            fail("麦克风打开失败（检查录音权限）")
             stopEverything()
             return
         }
@@ -278,7 +294,7 @@ class TranslatorService : Service() {
             locked = settings.overlayLocked,
         )
         if (!shown) {
-            subtitleStore.bumpError("没有悬浮窗权限，字幕将只在 App 内显示")
+            fail("没有悬浮窗权限，字幕将只在 App 内显示")
         }
 
         // 启动管线
@@ -393,7 +409,21 @@ class TranslatorService : Service() {
         runCatching { overlay.hide() }
         runCatching { projection?.stop() }
         projection = null
-        subtitleStore.setState(RunState.IDLE, "")
+
+        // ★ 不要把失败原因擦掉。
+        //
+        // 旧代码这里无条件 `setState(RunState.IDLE, "")`，而启动失败时是
+        // 「先 bumpError(原因) 再 stopEverything()」—— 结果原因立刻被这句清空，
+        // 用户只看到"未启动 + 错误×N"，**完全不知道哪里错了**（用户实测反馈）。
+        //
+        // 现在：如果有过错误，就把最后一条原因留在 detail 里显示出来。
+        val why = lastErrorText
+        if (why.isNotEmpty()) {
+            subtitleStore.setState(RunState.ERROR, why)
+            Log.w(TAG, "服务已停止，最后的原因：$why")
+        } else {
+            subtitleStore.setState(RunState.IDLE, "")
+        }
         setRunning(false)
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
