@@ -248,7 +248,7 @@ def run_cli(args: argparse.Namespace) -> int:
         print("\n提示：想先看效果可以跑 `python main.py --asr mock --translate mock`", file=sys.stderr)
         return 2
 
-    state = SubtitleState(max_lines=cfg.overlay.max_lines)
+    state = SubtitleState(max_lines=cfg.overlay.max_lines, history_lines=cfg.overlay.history_lines)
     control = RunControl()
     stats = LatencyStats()
 

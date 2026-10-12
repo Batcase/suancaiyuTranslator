@@ -44,9 +44,12 @@ class Status:
 class SubtitleState:
     """线程安全的字幕与状态容器。"""
 
-    def __init__(self, max_lines: int = 2) -> None:
+    def __init__(self, max_lines: int = 2, history_lines: int = 200) -> None:
         self._lock = threading.Lock()
         self.max_lines = max(1, int(max_lines))
+        # 历史保留条数。悬浮窗现在是一个"固定大小的面板"（类似桌面歌词），
+        # 用户把窗口拉大就该看到更多历史，所以不能只留几行。
+        self.history_lines = max(self.max_lines + 2, int(history_lines))
         self._lines: list[SubtitleLine] = []
         self._status = Status()
         self._sid = 0
@@ -117,10 +120,10 @@ class SubtitleState:
         return None
 
     def _trim(self) -> None:
-        # 多留几行做缓冲，UI 只显示 max_lines
-        keep = max(self.max_lines + 2, 4)
-        if len(self._lines) > keep:
-            del self._lines[: len(self._lines) - keep]
+        # 保留较多历史：悬浮窗是可拉伸的固定面板，拉大就能看到更多内容。
+        # 上限 history_lines，避免长时间运行内存无限增长。
+        if len(self._lines) > self.history_lines:
+            del self._lines[: len(self._lines) - self.history_lines]
 
     # ---------- 状态（管线线程调用）----------
     def set_status(self, **kwargs) -> None:

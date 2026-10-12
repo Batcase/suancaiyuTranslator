@@ -28,7 +28,7 @@ DEMO = [
 def main() -> int:
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 6.0
     cfg = load_config()
-    state = SubtitleState(max_lines=cfg.overlay.max_lines)
+    state = SubtitleState(max_lines=cfg.overlay.max_lines, history_lines=cfg.overlay.history_lines)
     stop = threading.Event()
 
     def inject() -> None:

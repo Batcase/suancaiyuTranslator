@@ -259,8 +259,14 @@ shots/*.png
 !shots/wizard.png
 !shots/settings.png
 !shots/android-overlay.png
+!shots/panel.png
 
 # 排查用的临时文件
 *.tmp
+*.err
+*.out
+*.log
+msg*.txt
+COMMIT_MSG*.txt
 android/COMMIT_MSG*.txt
 

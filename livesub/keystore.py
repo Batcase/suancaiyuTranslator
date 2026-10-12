@@ -379,6 +379,16 @@ translated_font_size = {cfg.overlay.translated_font_size}
 max_lines = {cfg.overlay.max_lines}
 click_through = {str(cfg.overlay.click_through).lower()}
 background_panel = {str(cfg.overlay.background_panel).lower()}
+
+# ---- 面板模式（像桌面歌词，可拉伸的固定面板）----
+# true  = 固定尺寸面板：窗口拉大只显示更多内容，字号不变（推荐）
+# false = 旧的"自适应高度滚动字幕"
+panel_mode = {str(cfg.overlay.panel_mode).lower()}
+panel_width = {cfg.overlay.panel_width}
+panel_height = {cfg.overlay.panel_height}
+history_lines = {cfg.overlay.history_lines}
+auto_scroll = {str(cfg.overlay.auto_scroll).lower()}
+show_scrollbar = {str(cfg.overlay.show_scrollbar).lower()}
 """
     TOML_PATH.write_text(text, encoding="utf-8")
 

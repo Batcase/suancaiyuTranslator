@@ -92,7 +92,10 @@ class AppPanel:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # 管线与悬浮窗
-        self.state = SubtitleState(max_lines=self.cfg.overlay.max_lines)
+        self.state = SubtitleState(
+            max_lines=self.cfg.overlay.max_lines,
+            history_lines=self.cfg.overlay.history_lines,
+        )
         self.stats = LatencyStats()
         self.control = None          # RunControl，由 Pipeline 使用
         self.pipeline = None
@@ -859,7 +862,10 @@ class AppPanel:
 
         # 重新读取配置，避免设置页改完没生效
         self.cfg = load_config()
-        self.state = SubtitleState(max_lines=self.cfg.overlay.max_lines)
+        self.state = SubtitleState(
+            max_lines=self.cfg.overlay.max_lines,
+            history_lines=self.cfg.overlay.history_lines,
+        )
         self.stats = LatencyStats()
 
         from .pipeline import Pipeline, RunControl

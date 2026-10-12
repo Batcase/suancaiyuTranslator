@@ -137,6 +137,15 @@ class SubtitleOverlay:
         self.win: "tk.Toplevel | None" = None
         self.rows: list[dict] = []
 
+        # ---- 面板模式状态（像桌面歌词那样，可拉伸的固定面板）----
+        self._panel_mode = bool(getattr(cfg.overlay, "panel_mode", True))
+        self.transcript = None          # panel.TranscriptView
+        self._resizing = False
+        self._resize_origin = (0, 0, 0, 0)
+        self._cursor_resize = False
+        self._grip = None
+        self._grip_ids: list[int] = []
+
     # ================= 对外接口 =================
     def request_action(self, action: str) -> None:
         """可从任意线程调用。"""
@@ -171,6 +180,14 @@ class SubtitleOverlay:
                 pass
             self.win = None
         self.rows.clear()
+        # 独立运行模式下还要退出 mainloop。
+        # 注意：这里只停字幕窗，根窗可能由主控面板持有（那种情况绝不能 quit，
+        # 否则会把整个面板一起关掉），所以只在 _own_root 时退。
+        if self._own_root:
+            try:
+                self.root.quit()
+            except Exception:
+                pass
 
     def run(self) -> None:
         """自带根窗的独立运行模式（命令行单独调试悬浮窗时用）。"""
@@ -181,7 +198,13 @@ class SubtitleOverlay:
             pass
         finally:
             self.stop()
+            # 必须显式退出 mainloop：stop() 只销毁窗口，而 _flash 排的定时器
+            # 还会占着事件循环，导致 "窗口没了但进程不退"（实测会一直挂住）。
             if self._own_root:
+                try:
+                    self.root.quit()
+                except Exception:
+                    pass
                 try:
                     self.root.destroy()
                 except Exception:
@@ -219,9 +242,16 @@ class SubtitleOverlay:
 
         sw = self.win.winfo_screenwidth()
         sh = self.win.winfo_screenheight()
-        self._width = max(360, int(sw * ov.width_ratio))
-        # 初始高度是"上限"，真正显示的窗口会按内容自适应缩小（见 _fit_window）
-        self._height = max(90, int(sh * ov.height_ratio))
+        if self._panel_mode:
+            # 面板模式：尺寸固定，用户自己拖。0 表示按屏幕比例给个初值。
+            pw = int(getattr(ov, "panel_width", 0) or 0) or max(420, int(sw * ov.width_ratio))
+            ph = int(getattr(ov, "panel_height", 0) or 0) or max(140, int(sh * ov.height_ratio))
+            self._width = max(240, pw)
+            self._height = max(90, ph)
+        else:
+            self._width = max(360, int(sw * ov.width_ratio))
+            # 初始高度是"上限"，真正显示的窗口会按内容自适应缩小（见 _fit_window）
+            self._height = max(90, int(sh * ov.height_ratio))
         self._bottom_offset = int(sh * ov.bottom_ratio)
         x = (sw - self._width) // 2
         y = sh - self._height - self._bottom_offset
@@ -254,6 +284,38 @@ class SubtitleOverlay:
         self.body.pack(side="top", fill="both", expand=True)
         self.rows: list[dict] = []
 
+        # ---- 面板模式：一个可滚动的固定面板，替代"自适应高度的滚动字幕" ----
+        if self._panel_mode:
+            from .panel import TranscriptView
+
+            self._panel_bg = str(getattr(ov, "panel_bg", "#000000"))
+            self._panel_alpha = float(getattr(ov, "panel_opacity", 0.7) or 0.7)
+            self._panel = True
+            self._area_bg = self._panel_bg
+            self._bar_bg = self._panel_bg
+            # 整窗用 -alpha 做半透明（桌面歌词的做法）：底板纯黑、透过它能看到
+            # 下面的直播画面。代价是文字也一起变淡，但 0.7 下仍然清楚。
+            # 之前的点阵 stipple 方案文字是全不透明的，但黑色底板会变成
+            # 50% 的点阵，看起来是"灰"的而不是"黑"的——用户反馈不好看。
+            if self._sentinel_ok:
+                self.win.attributes("-alpha", self._panel_alpha)
+            self.win.configure(bg=self._panel_bg)
+            self.status_bar.configure(bg=self._bar_bg)
+            self.body.configure(bg=self._panel_bg)
+            self.transcript = TranscriptView(
+                self.body,
+                self.f_target,
+                self.f_source,
+                show_panel=True,
+                opaque_bg=True,
+                bg=self._panel_bg,
+                bg_live=str(getattr(ov, "panel_bg_live", "#101010")),
+                auto_scroll=bool(getattr(ov, "auto_scroll", True)),
+            )
+            if getattr(ov, "show_scrollbar", True):
+                self.transcript.attach_scrollbar()
+            self.transcript.set_message("等待识别结果…（启动后这里会显示中文字幕）")
+
         self.hint = tk.Label(
             self.win,
             text="",
@@ -267,7 +329,10 @@ class SubtitleOverlay:
 
         self._apply_click_through(self._click_through)
         self._bind_events()
-        self._flash("就绪：F1 穿透 / F2 暂停 / F3 行数 / F4 重连 / 双击穿透 / 拖动移动")
+        if self._panel_mode:
+            self._flash("面板：拖右下角改大小 / Ctrl+拖 也可改 / 拖动移动 / F1穿透 F2暂停", 6000)
+        else:
+            self._flash("就绪：F1 穿透 / F2 暂停 / F3 行数 / F4 重连 / 双击穿透 / 拖动移动")
 
     def _bind_events(self) -> None:
         for widget in (self.win, self.body, self.status_bar, self.lbl_status):
@@ -275,6 +340,106 @@ class SubtitleOverlay:
             widget.bind("<B1-Motion>", self._on_drag)
             widget.bind("<ButtonRelease-1>", self._on_release)
             widget.bind("<Double-Button-1>", self._on_double)
+        if self._panel_mode:
+            # 右下角手柄 + Ctrl 拖动，两种改大小的方式都支持
+            win = self.win
+            win.bind("<Motion>", self._on_motion)
+            win.bind("<Control-Button-1>", self._on_ctrl_press)
+            win.bind("<Control-B1-Motion>", self._on_resize_drag)
+            win.bind("<Control-ButtonRelease-1>", self._on_resize_release)
+            self._create_grip()
+
+    # ================= 改大小（面板模式）=================
+    #
+    # 两种方式都支持：
+    #   1) 右下角一个小三角手柄（不会误触，鼠标移上去变斜向箭头）
+    #   2) 按住 Ctrl 拖窗口任意位置
+    # 改大小**只改变能看到多少内容，字号不变**。
+    _GRIP = 16
+
+    def _create_grip(self) -> None:
+        """右下角手柄：用几条斜线画个小三角，视觉上提示"这里能拖"。"""
+        # 手柄直接画在 win 上，用一个独立的小 Canvas 保证不挡布局
+        self._grip = tk.Canvas(
+            self.win,
+            width=self._GRIP,
+            height=self._GRIP,
+            bg=self._bar_bg,
+            highlightthickness=0,
+            bd=0,
+        )
+        self._grip.place(relx=1.0, rely=1.0, anchor="se")
+        for i, off in enumerate((3, 7, 11)):
+            self._grip.create_line(
+                self._GRIP - 2, off, off, self._GRIP - 2,
+                fill="#7A828C" if i < 2 else "#565D66", width=1,
+            )
+        self._grip.bind("<Button-1>", self._on_ctrl_press)
+        self._grip.bind("<B1-Motion>", self._on_resize_drag)
+        self._grip.bind("<ButtonRelease-1>", self._on_resize_release)
+        self._grip.bind("<Enter>", lambda e: self._set_cursor("size_nw_se"))
+        self._grip.bind("<Leave>", lambda e: self._set_cursor(""))
+
+    def _set_cursor(self, name: str) -> None:
+        try:
+            self.win.configure(cursor=name or "")
+        except Exception:
+            pass
+
+    def _on_motion(self, event) -> None:
+        """靠右下角时把光标变成斜向箭头，提示可拖。"""
+        if self._resizing:
+            return
+        w = self.win.winfo_width()
+        h = self.win.winfo_height()
+        near = event.x >= w - self._GRIP - 4 and event.y >= h - self._GRIP - 4
+        if near != self._cursor_resize:
+            self._cursor_resize = near
+            self._set_cursor("size_nw_se" if near else "")
+
+    def _on_ctrl_press(self, event) -> None:
+        self._resizing = True
+        self._dragging = False          # 不要同时触发"移动"
+        self._resize_origin = (
+            event.x_root,
+            event.y_root,
+            self.win.winfo_width(),
+            self.win.winfo_height(),
+        )
+
+    def _on_resize_drag(self, event) -> None:
+        if not self._resizing:
+            return
+        x0, y0, w0, h0 = self._resize_origin
+        w = max(240, w0 + (event.x_root - x0))
+        h = max(90, h0 + (event.y_root - y0))
+        self._apply_size(w, h)
+
+    def _on_resize_release(self, event) -> None:
+        if not self._resizing:
+            return
+        self._resizing = False
+        self._remember_size()
+
+    def _apply_size(self, w: int, h: int) -> None:
+        """改窗口大小并让内容重新折行（字号不变）。"""
+        x, y = self.win.winfo_x(), self.win.winfo_y()
+        self._width, self._height = w, h
+        self.win.geometry(f"{w}x{h}+{x}+{y}")
+        if self.transcript is not None:
+            self.win.update_idletasks()
+            self.transcript.resize(w, h - (self.status_bar.winfo_height() or 27))
+
+    def _remember_size(self) -> None:
+        """把尺寸记进配置，下次启动沿用。"""
+        try:
+            self.cfg.overlay.panel_width = int(self.win.winfo_width())
+            self.cfg.overlay.panel_height = int(self.win.winfo_height())
+            from . import keystore
+
+            keystore.save_config(self.cfg)
+        except Exception:
+            pass
 
     # ================= Win32 =================
     def _apply_click_through(self, enable: bool) -> None:
@@ -338,11 +503,13 @@ class SubtitleOverlay:
 
     # ================= 交互 =================
     def _on_press(self, event) -> None:
+        if self._resizing:
+            return
         self._dragging = True
         self._drag_origin = (event.x_root - self.win.winfo_x(), event.y_root - self.win.winfo_y())
 
     def _on_drag(self, event) -> None:
-        if not self._dragging:
+        if not self._dragging or self._resizing:
             return
         x = event.x_root - self._drag_origin[0]
         y = event.y_root - self._drag_origin[1]
@@ -353,7 +520,8 @@ class SubtitleOverlay:
             return
         self._dragging = False
         sh = self.win.winfo_screenheight()
-        self._bottom_offset = max(0, sh - self.win.winfo_y() - self._height)
+        h = self.win.winfo_height() if self._panel_mode else self._height
+        self._bottom_offset = max(0, sh - self.win.winfo_y() - h)
 
     def _on_double(self, event) -> None:
         self._handle_action("toggle_click_through")
@@ -368,9 +536,16 @@ class SubtitleOverlay:
             self.state.set_status(paused=self._paused)
             self._flash(f"字幕：{'已暂停' if self._paused else '继续'}")
         elif action == "toggle_history":
-            ov = self.cfg.overlay
-            self.state.max_lines = 1 if self.state.max_lines > 1 else max(2, ov.max_lines)
-            self._flash(f"显示行数：{self.state.max_lines}")
+            if self._panel_mode and self.transcript is not None:
+                # 面板模式下 F3 改成"显示/隐藏深色底板"——
+                # 面板能显示多少由窗口大小决定，不再由行数决定
+                self.transcript.show_panel = not self.transcript.show_panel
+                self.transcript.update_rows(self.state.snapshot()[0])
+                self._flash(f"深色底板：{'开' if self.transcript.show_panel else '关'}")
+            else:
+                ov = self.cfg.overlay
+                self.state.max_lines = 1 if self.state.max_lines > 1 else max(2, ov.max_lines)
+                self._flash(f"显示行数：{self.state.max_lines}")
         elif action == "reconnect":
             self._flash("正在重连…")
         elif action == "quit":
@@ -428,6 +603,25 @@ class SubtitleOverlay:
         self.root.after(40, self._tick)
     def _render(self) -> None:
         lines, status = self.state.snapshot()
+        if self._panel_mode:
+            # 面板模式：把**全部历史**交给面板，由它决定能显示多少
+            # （窗口拉大就自动显示更多，这正是"改大小不改字号"的落点）
+            key = (
+                tuple((l.sid, l.source, l.translated, l.final, l.failed) for l in lines),
+                status.state,
+                status.detail,
+                status.errors,
+                status.paused,
+                status.e2e_ms,
+            )
+            if key == self._last_key:
+                return
+            self._last_key = key
+            if self.transcript is not None:
+                self.transcript.update_rows(lines)
+            self._render_status(status)
+            return
+
         rows = lines[-max(1, self.state.max_lines) :]
         key = (
             tuple((l.sid, l.source, l.translated, l.final, l.failed) for l in rows),
@@ -447,9 +641,11 @@ class SubtitleOverlay:
     def _fit_window(self) -> None:
         """让窗口高度严格贴住内容，同时保持底边不动。
 
-        固定高度会让字幕悬在半空（行数少时尤其明显），所以这里按自算的内容
-        高度收紧窗口——不留空白，也不把可选中的大块"透明区域"压在直播画面上。
+        仅用于旧的"滚动字幕"模式。面板模式尺寸固定，不做自适应——
+        自适应正是"内容跳动太快"的来源之一。
         """
+        if self._panel_mode:
+            return
         self.win.update_idletasks()
         bar_h = self.status_bar.winfo_height() or 27
         need = bar_h + getattr(self, "_content_height", 0) + 4

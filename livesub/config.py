@@ -280,12 +280,41 @@ class OverlayConfig:
     bottom_ratio: float = 0.07
     opacity: float = 0.72
     original_font_size: int = 15
-    translated_font_size: int = 24
+    # 译文（中文）字号。原来是 24，偏大、快语速下面板里塞不下几句，
+    # 所以缩小 1/3 → 16。原文（日语）保持 15 不变。
+    translated_font_size: int = 16
+    # 面板里最多同时显示几组（组 = 译文 + 原文）。用户拉大窗口会看到更多。
     max_lines: int = 2
     click_through: bool = True
     # True = 字幕后面加一层深色底板（更清晰，但会遮住一点画面）
     # False = 纯文字直接浮在画面上（推荐，配合文字描边效果最好看）
     background_panel: bool = False
+
+    # ---------- 面板模式（像桌面歌词那样，而不是滚动字幕）----------
+    #
+    # 为什么改：快语速主播一两秒就换一批文字，"滚动字幕"形态下根本来不及读。
+    # 改成**固定尺寸的半透明面板**后：
+    #   * 窗口大小由用户自己拖（拖右下角），**字号不变**、能显示的内容变多
+    #   * 新内容从底部进入，顶部旧内容移出——像聊天记录，眼睛可以稳定地跟
+    #   * 面板大小固定 = 更新时不会整体跳动，这是"跳得过快"的主要来源
+    #
+    # False 则回到旧的"自适应高度滚动字幕"行为。
+    panel_mode: bool = True
+    # 面板尺寸（像素）。0 = 按屏幕比例算初始值
+    panel_width: int = 900
+    panel_height: int = 240
+    # 历史保留条数：拉大面板能看到多少历史。设太小就没意义
+    history_lines: int = 200
+    # 面板底板的透明度（0~1）。0.7 = 七成不透明，透过它还能看清底下的直播画面
+    panel_opacity: float = 0.7
+    # 面板背景色。纯黑最不挑画面（任何直播内容上对比度都够）
+    panel_bg: str = "#000000"
+    # 未定稿那句的底板色（原句还在生长）。比常态稍亮一点以示区别
+    panel_bg_live: str = "#101010"
+    # 新内容进入时是否自动跟到底部（像 tail -f）
+    auto_scroll: bool = True
+    # 右侧是否显示滚动条（滚轮任何时候都能用）
+    show_scrollbar: bool = True
 
 
 @dataclass
