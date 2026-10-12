@@ -91,48 +91,92 @@ class AudioCaptureEngine(private val scope: CoroutineScope) {
      */
     @SuppressLint("MissingPermission")
     fun openPlayback(projection: MediaProjection, sampleRate: Int = TARGET_SAMPLE_RATE): Boolean {
-        return try {
-            // 按用途白名单：媒体/游戏/未知。不按 UID 限定，
-            // 这样"看哪个直播 App"都能采到，用户不用手动选包名。
-            val config = android.media.AudioPlaybackCaptureConfiguration.Builder(projection)
-                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                .build()
+        // 按"用途"白名单匹配，而不是按 UID 限定包名 —— 这样看哪个直播 App
+        // 都能采到，用户不用手动选包名。
+        //
+        // 为什么要列这么多 usage：
+        //   用户反馈「**连蓝牙耳机就采不到声音**」。蓝牙（尤其 LE Audio / A2DP）
+        //   的音频在部分 ROM 上会被标成 MEDIA 以外的 usage，只匹配
+        //   MEDIA + GAME + UNKNOWN 就会一条都采不到。这里把"播放类"的 usage
+        //   尽量列全，先兜住。
+        //
+        // 唯独**不加 USAGE_VOICE_COMMUNICATION**：通话音频涉及隐私，
+        // 系统本来也不让回环采到，加了只会让配置更容易被整体拒绝。
+        val fullSet = intArrayOf(
+            AudioAttributes.USAGE_MEDIA,
+            AudioAttributes.USAGE_GAME,
+            AudioAttributes.USAGE_UNKNOWN,
+            AudioAttributes.USAGE_ASSISTANCE_SONIFICATION,
+            AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE,
+            AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY,
+            AudioAttributes.USAGE_NOTIFICATION,
+            AudioAttributes.USAGE_NOTIFICATION_EVENT,
+            AudioAttributes.USAGE_NOTIFICATION_RINGTONE,
+            AudioAttributes.USAGE_ALARM,
+        )
+        val safeSet = intArrayOf(
+            AudioAttributes.USAGE_MEDIA,
+            AudioAttributes.USAGE_GAME,
+            AudioAttributes.USAGE_UNKNOWN,
+        )
 
-            val rate = pickSampleRate(sampleRate)
-            val format = AudioFormat.Builder()
-                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .setSampleRate(rate)
-                .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-                .build()
+        // 分级尝试：个别 ROM 会因为某个 usage 拒绝整个配置，
+        // 那就退回到最保守的三项。比"一次失败就放弃"稳妥得多。
+        val attempts = listOf("全量用途" to fullSet, "常用用途" to safeSet)
 
-            val minBuf = AudioRecord.getMinBufferSize(
-                rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-            )
-            if (minBuf <= 0) {
-                Log.e(TAG, "getMinBufferSize 返回 $minBuf，设备不支持该格式")
-                return false
+        var lastError: Throwable? = null
+        for ((label, usageSet) in attempts) {
+            try {
+                val builder = android.media.AudioPlaybackCaptureConfiguration.Builder(projection)
+                for (u in usageSet) builder.addMatchingUsage(u)
+                val config = builder.build()
+
+                val rate = pickSampleRate(sampleRate)
+                val format = AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(rate)
+                    .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                    .build()
+
+                val minBuf = AudioRecord.getMinBufferSize(
+                    rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+                )
+                if (minBuf <= 0) {
+                    Log.e(TAG, "getMinBufferSize 返回 $minBuf，设备不支持该格式")
+                    lastError = IllegalStateException("设备不支持 ${rate}Hz 单声道 PCM16")
+                    continue
+                }
+
+                record = AudioRecord.Builder()
+                    .setAudioFormat(format)
+                    // 给 4 倍最小缓冲：太小会 underrun 丢数据，太大等于人为加延迟
+                    .setBufferSizeInBytes(minBuf * 4)
+                    .setAudioPlaybackCaptureConfig(config)
+                    .build()
+
+                actualSampleRate = rate
+                needsResample = rate != sampleRate
+                captureLabel = label
+                Log.i(TAG, "内录已打开（$label，${rate}Hz，usage ${usageSet.size} 项）")
+                startLoop()
+                return true
+            } catch (t: Throwable) {
+                // 常见失败：SecurityException（投影授权失效）、
+                // IllegalArgumentException（该 ROM 不接受某些 usage / 格式）
+                Log.w(TAG, "内录打开失败（$label）：${t.javaClass.simpleName}: ${t.message}")
+                lastError = t
+                release()
             }
-
-            record = AudioRecord.Builder()
-                .setAudioFormat(format)
-                // 给 4 倍最小缓冲：太小会 underrun 丢数据，太大等于人为加延迟
-                .setBufferSizeInBytes(minBuf * 4)
-                .setAudioPlaybackCaptureConfig(config)
-                .build()
-
-            actualSampleRate = rate
-            needsResample = rate != sampleRate
-            startLoop()
-            true
-        } catch (t: Throwable) {
-            // 常见失败：SecurityException（没有投影授权）、IllegalArgumentException（格式不支持）
-            Log.e(TAG, "打开内录失败", t)
-            release()
-            false
         }
+
+        Log.e(TAG, "内录全部尝试失败", lastError)
+        return false
     }
+
+    /** 供日志/界面排查用：实际生效的是哪档配置 */
+    @Volatile
+    var captureLabel: String = ""
+        private set
 
     /** 打开麦克风采集（兜底模式）。 */
     @SuppressLint("MissingPermission")

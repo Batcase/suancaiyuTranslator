@@ -74,6 +74,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** 麦克风权限申请：授权后直接进麦克风模式 */
+    private val micPermissionLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            startServiceWithMic()
+        } else {
+            toast("没有录音权限，麦克风模式用不了")
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settings = Settings(this)
@@ -143,7 +154,19 @@ class MainActivity : AppCompatActivity() {
         buttons.addView(stopButton, weight(start = dp(10)))
         root.addView(buttons)
         root.addView(text(getString(R.string.main_projection_first), 11f, "#9AA0A6").also {
-            it.setPadding(0, dp(8), 0, dp(14))
+            it.setPadding(0, dp(8), 0, dp(6))
+        })
+
+        // ---- 麦克风模式（内录采不到声音时的兜底）----
+        //
+        // 什么时候需要：被采集的 App 声明了不允许录（DRM 内容）、
+        // 或者**换了输出设备**（典型就是插上蓝牙耳机）导致回环拿不到数据。
+        // 这时对着喇叭用麦克风录也能用，音质差但总比没字幕强。
+        root.addView(
+            secondaryButton("改用麦克风模式（内录没声音时用）") { onStartMicClicked() }
+        )
+        root.addView(text("内录采不到声音时试试这个：音质差一些，但蓝牙耳机场景能用", 11f, "#6B7280").also {
+            it.setPadding(0, dp(4), 0, dp(14))
         })
 
         // ---- 状态与路由信息 ----
@@ -243,10 +266,17 @@ class MainActivity : AppCompatActivity() {
             toast("请先填写 Key：至少一家翻译 + 一家识别")
             return
         }
+        // ★ 刻意不在这里用 canDrawOverlays() 拦路。
+        //
+        // 旧实现在这里 `if (!canDraw) { 提示 + return }`，结果是：只要那个判断
+        // 返回 false（某些 ROM/分身/多用户下即使授权了也会返回 false），
+        // **整个翻译都启动不了**，用户看到的就是"给了权限也没用"。
+        //
+        // 现在改成：没授权就提示一次并给个跳转入口，但**照样启动**。
+        // 真的没有权限时，OverlayController 里的 addView 会抛
+        // SecurityException，那时再把准确原因显示到界面上。
         if (!OverlayController.canDraw(this)) {
-            toast("请先允许「显示在其他应用上层」，否则看不到字幕")
-            openOverlaySettings()
-            return
+            toast("没检测到悬浮窗权限，将先启动翻译；看不到字幕再点上方提示去授权")
         }
 
         // 启动内录（系统会弹"是否允许录制/投射"）
@@ -266,8 +296,37 @@ class MainActivity : AppCompatActivity() {
         startButton.postDelayed({ refreshUi() }, 800)
     }
 
-    private fun onStopClicked() {
-        startService(
+    /**
+     * 麦克风模式：不依赖 MediaProjection，直接录麦克风。
+     *
+     * 用途：内录采不到声音时的兜底。典型场景是被采集的 App 禁止录制
+     * （DRM 内容），或者**换了输出设备**（插蓝牙耳机）导致回环拿不到数据。
+     */
+    private fun onStartMicClicked() {
+        saveKeys()
+        if (!settings.isConfigured()) {
+            toast("请先填写 Key：至少一家翻译 + 一家识别")
+            return
+        }
+        val perm = android.Manifest.permission.RECORD_AUDIO
+        if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
+            micPermissionLauncher.launch(perm)
+            return
+        }
+        startServiceWithMic()
+    }
+
+    private fun startServiceWithMic() {
+        val intent = Intent(this, TranslatorService::class.java).apply {
+            action = TranslatorService.ACTION_START
+            putExtra(TranslatorService.EXTRA_USE_MIC, true)
+        }
+        ContextCompat.startForegroundService(this, intent)
+        toast("麦克风模式已启动（对着喇叭/耳机听筒录）")
+        startButton.postDelayed({ refreshUi() }, 800)
+    }
+
+    private fun onStopClicked() {        startService(
             Intent(this, TranslatorService::class.java).setAction(TranslatorService.ACTION_STOP)
         )
         startButton.postDelayed({ refreshUi() }, 400)
@@ -305,13 +364,18 @@ class MainActivity : AppCompatActivity() {
         stopButton.isEnabled = running
         if (!running) statusText.text = getString(R.string.main_idle)
 
-        // 订阅服务里的字幕状态（同进程，直接观察）
-        val store = TranslatorService.store
-        if (store != null && !collecting) {
+        // 订阅字幕状态。
+        //
+        // store 现在是**进程级单例**（首次访问就创建），不再是"服务起来之前为 null"。
+        // 旧代码写的是 `val store = TranslatorService.store; if (store != null && !collecting)`，
+        // 而 Activity 首次 refreshUi 时服务还没启动 → store 为 null → collecting 一直是 false
+        // → 之后即使服务起来了也**再也不订阅**，界面永远显示"未启动"。
+        // 这个坑就是用户反馈的"App 内未生效"。
+        if (!collecting) {
             collecting = true
             lifecycleScope.launch {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
-                    store.state.collect { s -> renderState(s) }
+                    TranslatorService.store.state.collect { s -> renderState(s) }
                 }
             }
         }
@@ -346,6 +410,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshOverlayWarning() {
+        // 提示条只在"系统说没权限"时显示，但**任何情况下都保持可点**——
+        // 有些 ROM 上 canDrawOverlays() 会误报已授权，用户仍需要一个入口去检查。
         overlayWarn.visibility = if (OverlayController.canDraw(this)) View.GONE else View.VISIBLE
     }
 

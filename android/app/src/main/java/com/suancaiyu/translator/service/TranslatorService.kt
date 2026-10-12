@@ -50,7 +50,8 @@ class TranslatorService : Service() {
     private val main = Handler(Looper.getMainLooper())
 
     private lateinit var settings: Settings
-    private lateinit var store: SubtitleStore
+    /** 类内引用；真正的单例在 companion 里（见 store） */
+    private lateinit var subtitleStore: SubtitleStore
     private lateinit var overlay: OverlayController
     private lateinit var capture: AudioCaptureEngine
     private var pipeline: TranslationPipeline? = null
@@ -67,14 +68,34 @@ class TranslatorService : Service() {
         const val EXTRA_RESULT_DATA = "result_data"
         const val EXTRA_USE_MIC = "use_mic"
 
-        /** 全局单例，方便 Activity/悬浮窗读取状态（同进程，不需要 AIDL） */
-        @Volatile
-        var store: SubtitleStore? = null
-            private set
+        /**
+         * 字幕状态的**进程级单例**。
+         *
+         * 为什么不能只在 Service.onCreate 里创建：
+         *   Activity 在 `refreshUi()` 时就要订阅它，而那时 Service 可能还没起来，
+         *   拿到的是 null —— 结果是 **Activity 永远订阅不上**（旧代码里
+         *   `store != null && !collecting` 一次不成立就再也不重试），
+         *   服务启动后界面照样显示"未启动"。用户反馈的"App 内未生效"就是这个。
+         *
+         * 改成"首次访问就创建"：Activity 与 Service 拿到的一定是同一个实例。
+         */
+        private val _store: SubtitleStore by lazy { SubtitleStore(maxLines = 2) }
+
+        val store: SubtitleStore get() = _store
+
+        /** 按配置调整面板行数与历史长度（Service 启动时调用） */
+        fun configureStore(maxLines: Int, historyLines: Int) {
+            _store.maxLines = maxLines.coerceIn(1, 8)
+            _store.historyLines = historyLines.coerceAtLeast(maxLines + 2)
+        }
 
         @Volatile
         var running: Boolean = false
             private set
+
+        internal fun setRunning(value: Boolean) {
+            running = value
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -82,7 +103,9 @@ class TranslatorService : Service() {
     override fun onCreate() {
         super.onCreate()
         settings = Settings(this)
-        store = SubtitleStore(maxLines = settings.maxLines).also { Companion.store = it }
+        // 用进程级单例，并按要求调整行数/历史长度
+        configureStore(settings.maxLines, settings.historyLines)
+        subtitleStore = _store
         overlay = OverlayController(this)
         capture = AudioCaptureEngine(scope)
 
@@ -92,7 +115,7 @@ class TranslatorService : Service() {
         //   在后台协程里直接 render() 会抛 CalledFromWrongThreadException 并让整个服务崩溃。
         //   （这个崩溃是在真机上跑出来的，编译期完全看不出来。）
         scope.launch {
-            store.state.collectLatest { s ->
+            subtitleStore.state.collectLatest { s ->
                 main.post { runCatching { overlay.render(s) } }
             }
         }
@@ -123,7 +146,7 @@ class TranslatorService : Service() {
                     val data: Intent? = intent?.getParcelableExtra(EXTRA_RESULT_DATA)
                     if (data == null) {
                         Log.e(TAG, "缺少 MediaProjection 授权数据，无法启动")
-                        store.bumpError("没有拿到录制授权")
+                        subtitleStore.bumpError("没有拿到录制授权")
                         stopEverything()
                         return START_NOT_STICKY
                     }
@@ -155,11 +178,11 @@ class TranslatorService : Service() {
             } else {
                 startForeground(NOTIF_ID, notification)
             }
-            running = true
+            setRunning(true)
         } catch (t: Throwable) {
             // 最常见原因：没有 FOREGROUND_SERVICE_MEDIA_PROJECTION 权限，或没拿到投影授权
             Log.e(TAG, "startForeground 失败", t)
-            store.bumpError("前台服务启动失败：${t.javaClass.simpleName}")
+            subtitleStore.bumpError("前台服务启动失败：${t.javaClass.simpleName}")
             stopEverything()
         }
     }
@@ -169,7 +192,7 @@ class TranslatorService : Service() {
             val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             val p = mgr.getMediaProjection(resultCode, data)
             if (p == null) {
-                store.bumpError("MediaProjection 获取失败（授权可能已失效）")
+                subtitleStore.bumpError("MediaProjection 获取失败（授权可能已失效）")
                 stopEverything()
                 return
             }
@@ -186,10 +209,10 @@ class TranslatorService : Service() {
                 main,
             )
 
-            store.setState(RunState.STARTING, "正在启动内录…")
+            subtitleStore.setState(RunState.STARTING, "正在启动内录…")
             val ok = capture.openPlayback(p)
             if (!ok) {
-                store.bumpError("内录打开失败，请重试或改用麦克风模式")
+                subtitleStore.bumpError("内录打开失败，请重试或改用麦克风模式")
                 stopEverything()
                 return
             }
@@ -197,16 +220,16 @@ class TranslatorService : Service() {
             afterCaptureReady()
         } catch (t: Throwable) {
             Log.e(TAG, "启动投射失败", t)
-            store.bumpError("启动失败：${t.javaClass.simpleName}")
+            subtitleStore.bumpError("启动失败：${t.javaClass.simpleName}")
             stopEverything()
         }
     }
 
     private fun startWithMic() {
-        store.setState(RunState.STARTING, "正在启动麦克风…")
+        subtitleStore.setState(RunState.STARTING, "正在启动麦克风…")
         val ok = capture.openMic()
         if (!ok) {
-            store.bumpError("麦克风打开失败（检查录音权限）")
+            subtitleStore.bumpError("麦克风打开失败（检查录音权限）")
             stopEverything()
             return
         }
@@ -231,8 +254,15 @@ class TranslatorService : Service() {
                 if (capture.peakRms < 0.001f) {
                     quietTicks += 1
                     if (quietTicks == 5) {
-                        Log.w(TAG, "连续 10 秒没有采到任何声音 —— 可能是没有音频在播放，" +
-                            "或被采集的 App 禁止了录制（版权保护）")
+                        val msg = "连续 10 秒没采到声音 —— 可能是没在播放、" +
+                            "被采集的 App 禁止录制、或**换了输出设备（例如插上蓝牙耳机）**。" +
+                            "可改用麦克风模式"
+                        Log.w(TAG, msg)
+                        // 也反映到界面上：否则用户只看到"在跑但没字幕"，无从判断
+                        subtitleStore.setState(
+                            RunState.RUNNING,
+                            "没采到声音：可试麦克风模式",
+                        )
                     }
                 } else {
                     quietTicks = 0
@@ -248,7 +278,7 @@ class TranslatorService : Service() {
             locked = settings.overlayLocked,
         )
         if (!shown) {
-            store.bumpError("没有悬浮窗权限，字幕将只在 App 内显示")
+            subtitleStore.bumpError("没有悬浮窗权限，字幕将只在 App 内显示")
         }
 
         // 启动管线
@@ -263,10 +293,14 @@ class TranslatorService : Service() {
         // 把采集到的音频喂给识别
         scope.launch {
             capture.frames.collect { frame ->
-                if (store.state.value.state == RunState.PAUSED) return@collect
+                if (subtitleStore.state.value.state == RunState.PAUSED) return@collect
                 pipeline?.let { pipe ->
                     // 管线内部持有 asr 客户端；这里通过扩展方法转发
                     pipe.feedAudio(frame.pcm, frame.capturedAtMs)
+                    // 顺便驱动一次"静默兜底"检查：服务端迟迟不给 sentence_end 时，
+                    // 由它把攒着的整句发出去，否则字幕会一直空着。
+                    // 采集是 ~50 帧/秒，真的检查由管线内部自己按时间判断，这里只负责给时机。
+                    pipe.onTick()
                 }
             }
         }
@@ -288,11 +322,21 @@ class TranslatorService : Service() {
         scope.launch {
             val before = capture.peakRms
             Log.i(TAG, "=== 音频自测开始 === 播放前 peak=${"%.4f".format(before)}")
-            val played = com.suancaiyu.translator.audio.TonePlayer.play(
-                freqHz = 440.0, seconds = 4.0, amplitude = 0.7
-            )
+
+            // 优先播**内置日语样本**：这样能顺带走完"内录 → 识别 → 翻译"整条链路，
+            // 直接在日志里看到识别结果对不对（正弦波只能证明采到音频了）。
+            val resId = resources.getIdentifier("ja_sample", "raw", packageName)
+            val played = if (resId != 0) {
+                Log.i(TAG, "音频自测：播放内置日语样本")
+                com.suancaiyu.translator.audio.TonePlayer.playAsset(this@TranslatorService, resId)
+            } else {
+                Log.i(TAG, "音频自测：没有内置样本，退回正弦波")
+                com.suancaiyu.translator.audio.TonePlayer.play(
+                    freqHz = 440.0, seconds = 4.0, amplitude = 0.7
+                )
+            }
             if (!played) {
-                Log.e(TAG, "=== 音频自测失败 === 测试音没能播放（设备音频输出有问题）")
+                Log.e(TAG, "=== 音频自测失败 === 测试音频没能播放（设备音频输出有问题）")
                 return@launch
             }
             // 等采集侧统计刷新
@@ -324,7 +368,7 @@ class TranslatorService : Service() {
         )
         return NotificationCompat.Builder(this, App.CHANNEL_ID)
             .setContentTitle(getString(R.string.notif_title))
-            .setContentText(store.state.value.detail.ifEmpty { getString(R.string.state_running) })
+            .setContentText(subtitleStore.state.value.detail.ifEmpty { getString(R.string.state_running) })
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -337,7 +381,7 @@ class TranslatorService : Service() {
     private fun updateNotification() {
         runCatching {
             val nm = getSystemService(NotificationManager::class.java)
-            nm?.notify(NOTIF_ID, buildNotification(paused = store.state.value.state == RunState.PAUSED))
+            nm?.notify(NOTIF_ID, buildNotification(paused = subtitleStore.state.value.state == RunState.PAUSED))
         }
     }
 
@@ -349,8 +393,8 @@ class TranslatorService : Service() {
         runCatching { overlay.hide() }
         runCatching { projection?.stop() }
         projection = null
-        store.setState(RunState.IDLE, "")
-        running = false
+        subtitleStore.setState(RunState.IDLE, "")
+        setRunning(false)
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -360,7 +404,7 @@ class TranslatorService : Service() {
         runCatching { overlay.hide() }
         runCatching { pipeline?.stop() }
         scope.cancel()
-        running = false
+        setRunning(false)
         super.onDestroy()
     }
 }

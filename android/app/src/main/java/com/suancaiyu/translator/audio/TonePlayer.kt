@@ -24,6 +24,49 @@ object TonePlayer {
     private const val TAG = "TonePlayer"
 
     /**
+     * 播放内置的日语样本（`res/raw/ja_sample.wav`）。
+     *
+     * 用来做**确定性的端到端自测**：样本本身是一段已知内容的日语，
+     * 播出来后会被内录采到 → 走完整识别→翻译链路 → 能直接看识别结果对不对。
+     * 这比播放正弦波强得多（正弦波只能证明"采到音频了"，证明不了识别链路）。
+     *
+     * 模拟器上通常没有 TTS 引擎，所以自带一段样本是最可靠的验证手段。
+     */
+    suspend fun playAsset(context: android.content.Context, resId: Int): Boolean =
+        withContext(Dispatchers.IO) {
+            var player: android.media.MediaPlayer? = null
+            return@withContext try {
+                val afd = context.resources.openRawResourceFd(resId)
+                    ?: return@withContext false
+                player = android.media.MediaPlayer().apply {
+                    setAudioAttributes(
+                        AudioAttributes.Builder()
+                            // 必须是 USAGE_MEDIA，否则内录的 usage 白名单匹配不到
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+                    prepare()
+                }
+                afd.close()
+                player.start()
+                Log.i(TAG, "开始播放内置日语样本（${player.duration}ms）")
+                val dur = player.duration
+                kotlinx.coroutines.delay(dur.toLong() + 500)
+                true
+            } catch (t: Throwable) {
+                Log.e(TAG, "播放内置样本失败", t)
+                false
+            } finally {
+                runCatching {
+                    player?.stop()
+                    player?.release()
+                }
+            }
+        }
+
+    /**
      * 播放一段正弦波，音量可指定。
      *
      * @param freqHz 频率（440 = 标准音 A）

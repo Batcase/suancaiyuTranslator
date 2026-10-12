@@ -85,7 +85,12 @@ class Settings(context: Context) {
 
     var maxLines: Int
         get() = prefs.getInt(KEY_MAX_LINES, 2)
-        set(v) = prefs.edit().putInt(KEY_MAX_LINES, v.coerceIn(1, 4)).apply()
+        set(v) = prefs.edit().putInt(KEY_MAX_LINES, v.coerceIn(1, 8)).apply()
+
+    /** 历史保留条数：面板拉大后能看到多少历史 */
+    var historyLines: Int
+        get() = prefs.getInt(KEY_HISTORY_LINES, 200)
+        set(v) = prefs.edit().putInt(KEY_HISTORY_LINES, v.coerceIn(10, 2000)).apply()
 
     companion object {
         private const val PREF_NAME = "settings"
@@ -100,5 +105,6 @@ class Settings(context: Context) {
         private const val KEY_OVERLAY_LOCKED = "overlay_locked"
         private const val KEY_OVERLAY_OFFSET = "overlay_bottom_offset"
         private const val KEY_MAX_LINES = "max_lines"
+        private const val KEY_HISTORY_LINES = "history_lines"
     }
 }

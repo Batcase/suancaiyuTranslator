@@ -38,7 +38,19 @@ data class SubtitleUiState(
     val e2eMs: Long = 0L,
 )
 
-class SubtitleStore(private val maxLines: Int = 2) {
+class SubtitleStore(maxLines: Int = 2, historyLines: Int = 200) {
+
+    /**
+     * 面板同时显示几组内容。
+     *
+     * 做成**可变属性**（而不是构造函数参数）：Activity 与 Service 通过进程级单例
+     * 共享同一个 store，而"行数"这类设置可能在服务启动后才读到，需要能改。
+     * 之前是 `private val maxLines`，外部赋值会直接编译不过。
+     */
+    var maxLines: Int = maxLines.coerceIn(1, 8)
+
+    /** 历史保留条数：面板拉大后能看到多少历史 */
+    var historyLines: Int = historyLines.coerceAtLeast(this.maxLines + 2)
 
     private val _state = MutableStateFlow(SubtitleUiState())
     val state: StateFlow<SubtitleUiState> = _state.asStateFlow()

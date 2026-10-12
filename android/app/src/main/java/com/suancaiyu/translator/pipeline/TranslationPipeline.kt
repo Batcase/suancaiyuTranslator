@@ -77,6 +77,34 @@ class TranslationPipeline(
         val capturedAtMs: Long,
     )
 
+    /**
+     * 是否"等断句再整句翻"。
+     *
+     * true（默认，与 PC 端一致）：ASR 的中间结果**只更新屏幕上的原文**，
+     *   译文等服务端判定这句说完再整句翻一次。
+     *   好处：译文连贯、不会把同一句翻好几遍、省 token。
+     *   （实测：快语速下翻译请求从 9 次降到 3 次，输入字符减少 56%）
+     *
+     * false：边说边翻，字幕出现更快，但快语速时会碎片化。
+     */
+    private val sentenceGated: Boolean = true
+
+    /** 攒着等断句的整句（原文） */
+    private var pending: String = ""
+    private var pendingAt: Long = 0L
+    private var pendingLastAt: Long = 0L
+    private var currentCapturedAt: Long = 0L
+
+    /** 攒够这么多字符就先翻（防止一口气说很久导致字幕一直空着） */
+    private val maxPendingChars: Int = 60
+
+    /** 静默这么久没有新内容就先翻（服务端不给断句信号时的兜底） */
+    private val pendingTimeoutMs: Long = 1200
+
+    // 注意：Kotlin 一个类只能有一个 companion object（本文件末尾已有一个），
+    // 所以句末标点放在这里当普通属性，不再另开 companion。
+    private val softBreak: Set<Char> = "。！？!?…‥".toSet()
+
     // ---------------------------------------------------------------
 
     fun start(): Boolean {
@@ -210,7 +238,16 @@ class TranslationPipeline(
                 }
                 currentSource = text
                 store.setSource(currentSid, text)
-                maybeSpeculate(text, event.audioCapturedAtMs)
+                if (sentenceGated) {
+                    // 只说原文、不动翻译 —— 等断句（或兜底条件）再整句翻。
+                    // 与 PC 端行为一致：解决快语速下"同一句被反复翻译、
+                    // 且每次只看到半句话"造成的碎片化。
+                    pending = text
+                    pendingLastAt = System.currentTimeMillis()
+                    maybeFlushPending()
+                } else {
+                    maybeSpeculate(text, event.audioCapturedAtMs)
+                }
             }
 
             AsrEvent.Kind.FINAL -> {
@@ -221,13 +258,21 @@ class TranslationPipeline(
                         if (currentSource.isEmpty()) currentSid = store.beginSentence()
                         currentSource = text
                         store.setSource(currentSid, text)
-                        maybeSpeculate(text, event.audioCapturedAtMs, force = true)
+                        if (sentenceGated) {
+                            pending = text
+                            pendingLastAt = System.currentTimeMillis()
+                            maybeFlushPending()
+                        } else {
+                            maybeSpeculate(text, event.audioCapturedAtMs, force = true)
+                        }
                     }
                     return
                 }
 
                 // 句子结束
-                val finalText = text.ifEmpty { currentSource }
+                var finalText = text.ifEmpty { currentSource }
+                // 缓冲区里是整句，比"最后一段"更完整
+                if (sentenceGated && pending.isNotBlank()) finalText = pending.trim()
                 if (finalText.isBlank()) {
                     if (currentSid != 0L) store.setSource(currentSid, "", final = true)
                     resetSentence()
@@ -249,6 +294,62 @@ class TranslationPipeline(
         lastSpecText = ""
         lastSpecAt = 0L
         currentSid = 0L
+        pending = ""
+        pendingAt = 0L
+        pendingLastAt = 0L
+    }
+
+    /**
+     * 判断攒着的这句要不要现在翻。
+     *
+     * 触发条件（先满足哪个算哪个）：
+     *   1. 攒够 maxPendingChars —— 防止一口气说很久导致字幕一直空着
+     *   2. 静默超过 pendingTimeoutMs —— 服务端没给断句信号时的兜底
+     *   3. 标点软断句 —— 末尾是句末标点且已攒到一半容量
+     *
+     * 关于第 3 条：带 BGM 的直播音频动态范围常被压得极平（PC 端实测
+     * P10~P90 仅 1dB），靠能量根本找不到停顿，只剩"攒够字符数硬切"，
+     * 而那会切在句子中间。用标点断就自然多了。
+     */
+    private fun maybeFlushPending(force: Boolean = false) {
+        val text = pending.trim()
+        if (text.isEmpty()) return
+        val now = System.currentTimeMillis()
+
+        if (!force) {
+            val tooLong = text.length >= maxPendingChars
+            val quiet = if (pendingLastAt > 0) now - pendingLastAt else 0L
+            val silentTooLong = quiet >= pendingTimeoutMs
+            val punctBreak = text.length >= 12 &&
+                text.last() in softBreak &&
+                text.length >= maxPendingChars / 2
+            if (!(tooLong || silentTooLong || punctBreak)) return
+        }
+
+        val sid = currentSid
+        if (sid == 0L) return
+        val captured = if (currentCapturedAt > 0) currentCapturedAt else now
+        store.setSource(sid, text, final = true)
+        submit(text, final = true, capturedAtMs = captured, sid = sid)
+        pending = ""
+        pendingAt = 0L
+        pendingLastAt = 0L
+        lastSpecText = text
+    }
+
+    /**
+     * 由采集循环周期调用：负责"静默兜底"。
+     *
+     * 服务端迟迟不给 sentence_end 时（网络卡顿、或一句话说了很久），
+     * 靠它把攒着的整句发出去，否则字幕会一直空着。
+     *
+     * 采集约 50 帧/秒，这里每次都调；真正的判断在 maybeFlushPending 内部
+     * 按"字符数 / 静默时长 / 句末标点"决定要不要发，所以只是给个时机。
+     */
+    fun onTick() {
+        if (!sentenceGated) return
+        if (pending.isBlank()) return
+        maybeFlushPending()
     }
 
     private fun maybeSpeculate(text: String, capturedAtMs: Long, force: Boolean = false) {
@@ -303,6 +404,8 @@ class TranslationPipeline(
      */
     fun feedAudio(pcm: ByteArray, capturedAtMs: Long) {
         if (stopped.get()) return
+        // 记下"这段音频被播放的时刻"，攒着的那句等会儿提交时要用它算真实延迟
+        if (capturedAtMs > 0) currentCapturedAt = capturedAtMs
         asr?.sendAudio(pcm, capturedAtMs)
     }
 
