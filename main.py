@@ -54,6 +54,37 @@ BANNER = r"""
 """
 
 
+def _is_beta(ver: str) -> bool:
+    """beta / alpha / rc 之类的测试版。"""
+    return any(t in ver.lower() for t in ("beta", "alpha", "rc", "dev"))
+
+
+def _version_text() -> str:
+    """版本说明，附带运行方式与（打包后的）构建时间。
+
+    为什么要把"运行方式/构建时间"也带上：用户报问题时最常见的一句是
+    "我测的是哪个包"——带上这些能直接对上是源码版还是 exe 版、什么时候打的。
+    """
+    import sys as _sys
+
+    tag = "（测试版）" if _is_beta(__version__) else ""
+    if getattr(_sys, "frozen", False):
+        how = "独立 exe 版"
+        # PyInstaller 会把 exe 的修改时间作为构建时间的近似
+        try:
+            from pathlib import Path as _P
+            import datetime as _dt
+
+            mt = _P(_sys.executable).stat().st_mtime
+            built = _dt.datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            built = "未知"
+    else:
+        how = "源码版"
+        built = "—"
+    return f"酸菜鱼翻译器 {__version__}{tag}\n运行方式: {how}\n构建时间: {built}"
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="酸菜鱼翻译器",
@@ -82,7 +113,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--log", nargs="?", const="auto", default="", help="把字幕写成 JSONL（默认 logs/）")
     p.add_argument("--duration", type=float, default=0.0, help="运行指定秒数后自动退出")
     p.add_argument("--check", action="store_true", help="只做环境自检然后退出")
-    p.add_argument("--version", action="version", version=f"酸菜鱼翻译器 {__version__}")
+    p.add_argument("--version", action="version", version=_version_text())
     return p.parse_args(argv)
 
 

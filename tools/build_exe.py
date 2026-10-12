@@ -32,6 +32,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 NAME = "酸菜鱼翻译器"
 
+#: exe 文件名带上版本号，方便同时留着多个版本对比（也免得"我测的是哪个"搞混）
+try:
+    _version = (ROOT / "livesub" / "__init__.py").read_text(encoding="utf-8")
+    _version = _version.split('__version__ = "', 1)[1].split('"', 1)[0]
+except Exception:
+    _version = "dev"
+EXE_NAME = f"{NAME}-{_version}"
+
 #: 明确排除的重型/无关模块（能显著减小体积、缩短打包时间）
 EXCLUDES = [
     "faster_whisper",      # 可选依赖，体积巨大，故意不打
@@ -57,7 +65,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="打包成独立 exe")
     ap.add_argument("--onedir", action="store_true", help="打包成目录而不是单文件（启动更快）")
     ap.add_argument("--console", action="store_true", help="保留控制台窗口（便于排错）")
-    ap.add_argument("--name", default=NAME, help="可执行文件名")
+    ap.add_argument("--name", default=EXE_NAME, help=f"可执行文件名（默认 {EXE_NAME}）")
     args = ap.parse_args()
 
     try:

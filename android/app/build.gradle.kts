@@ -20,8 +20,9 @@ android {
         applicationId = "com.suancaiyu.translator"
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        // 与 PC 端保持一致（Android 的 versionName 允许字母后缀）
+        versionName = "1.1beta"
 
         // 云端识别/翻译的默认配置（也可在 App 内设置页里改）
         buildConfigField("String", "DEFAULT_ASR_PROVIDER", "\"paraformer\"")

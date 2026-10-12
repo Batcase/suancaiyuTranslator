@@ -10,5 +10,5 @@
     stats       端到端延迟统计
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1beta"
 __all__ = ["__version__"]

@@ -25,6 +25,7 @@ from tkinter import font as tkfont
 from tkinter import ttk
 
 from . import keystore
+from . import __version__ as _version
 from .config import Config, load_config
 from .state import SubtitleState
 from .stats import LatencyStats
@@ -82,7 +83,10 @@ class AppPanel:
     def __init__(self, cfg: Config | None = None) -> None:
         self.cfg = cfg or load_config()
         self.root = tk.Tk()
-        self.root.title("酸菜鱼翻译器")
+        # 标题带版本号：测试期用户要能一眼确认自己跑的是哪个包
+        _beta = any(t in _version.lower() for t in ("beta", "alpha", "rc", "dev"))
+        _tag = "（测试版）" if _beta else ""
+        self.root.title(f"酸菜鱼翻译器 v{_version}{_tag}")
         self.root.configure(bg=BG)
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
