@@ -56,7 +56,13 @@ class TranscriptView:
         bg: str = COLOR_PANEL,
         bg_live: str = COLOR_PANEL_LIVE,
         auto_scroll: bool = True,
+        on_hover_change=None,
+        **kwargs,
     ) -> None:
+        # 吃掉未识别的关键字参数：调用方（overlay）可能传入不同版本命名的回调，
+        # 少一个参数也不该让整个悬浮窗起不来。
+        if on_hover_change is None:
+            on_hover_change = kwargs.get("on_click_through_change")
         self.f_target = f_target
         self.f_source = f_source
         self.show_panel = show_panel
@@ -66,6 +72,9 @@ class TranscriptView:
         self.bg = bg
         self.bg_live = bg_live
         self.auto_scroll = auto_scroll
+        #: 鼠标悬停状态变化时回调（用来临时关掉鼠标穿透，否则滚轮收不到）
+        self.on_hover_change = on_hover_change
+        self._hovering = False
 
         # 底板完全不透明时画布也必须是同一个底色，否则会露出窗口底色
         self.canvas = tk.Canvas(
@@ -90,10 +99,36 @@ class TranscriptView:
         self._viewport_h = 0
         #: 宽度还不可信时暂存的行，等窗口布局完成后再画
         self._pending_rows: list[SubtitleLine] | None = None
+        #: "等待声音…"占位文字的 canvas item（有内容时要删掉）
+        self._placeholder_ids: list[int] = []
 
         self.canvas.bind("<MouseWheel>", self._on_wheel)
         self.canvas.bind("<Button-4>", lambda e: self._scroll_units(-3))
         self.canvas.bind("<Button-5>", lambda e: self._scroll_units(3))
+
+        # 鼠标进入/离开时切换"鼠标穿透"。
+        #
+        # 为什么必须这么做：面板默认是**鼠标穿透**的（不然会挡住直播软件的点击），
+        # 而穿透在 Win32 里就是给窗口加 WS_EX_TRANSPARENT —— 那种状态下窗口
+        # **完全不接收任何鼠标事件**，滚轮自然也收不到，"滚轮回看历史"就是失效的。
+        #
+        # 折中方案：鼠标悬停在面板上时临时关掉穿透（这样能滚动），
+        # 移开后再恢复（继续不挡直播）。对用户来说就是"鼠标移上去就能滚"。
+        self.on_hover_change = on_hover_change
+        self.canvas.bind("<Enter>", lambda e: self._set_hover(True), add="+")
+        self.canvas.bind("<Leave>", lambda e: self._set_hover(False), add="+")
+
+    def _set_hover(self, hovering: bool) -> None:
+        self._hovering = hovering
+        if self.on_hover_change is not None:
+            try:
+                self.on_hover_change(hovering)
+            except Exception:
+                pass
+
+    @property
+    def hovering(self) -> bool:
+        return self._hovering
 
     # ------------------------------------------------------------------
     # 滚动

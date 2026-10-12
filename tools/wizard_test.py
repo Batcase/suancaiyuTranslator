@@ -172,13 +172,20 @@ def main() -> int:
     panel.root.after(60000, panel.root.quit)
     panel.root.mainloop()
 
-    # 还原现场
+    # 还原现场。
+    # 注意：如果测试前**本来就没有** config.toml，测试生成的必须删掉——
+    # 否则会留下一个"测试残留配置"，之后所有运行都被它覆盖（默认值改了也不生效，
+    # 这个坑实际踩过：改小了字号但界面没变，因为残留 config.toml 里还是旧值）。
     shutil.copy2(BACKUP, ENV)
     BACKUP.unlink()
     if TOML_BACKUP.exists():
         shutil.copy2(TOML_BACKUP, TOML)
         TOML_BACKUP.unlink()
-    print(f"\n已还原原有 {ENV.name} / config.toml")
+        print(f"\n已还原原有 {ENV.name} / config.toml")
+    else:
+        if TOML.exists():
+            TOML.unlink()
+        print(f"\n已还原原有 {ENV.name}；测试生成的 config.toml 已删除（测试前不存在）")
 
     print("=" * 60)
     if FAILED:

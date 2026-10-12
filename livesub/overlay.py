@@ -145,6 +145,10 @@ class SubtitleOverlay:
         self._cursor_resize = False
         self._grip = None
         self._grip_ids: list[int] = []
+        #: 用户用 F1 手动切换过穿透 → 之后不再让"悬停自动切换"插手
+        self._hover_override = False
+        #: 首帧是否已经强制刷过状态栏（见 _tick）
+        self._first_render_done = False
 
     # ================= 对外接口 =================
     def request_action(self, action: str) -> None:
@@ -270,7 +274,9 @@ class SubtitleOverlay:
         self.status_bar.pack(side="top", fill="x")
         self.lbl_status = tk.Label(
             self.status_bar,
-            text="启动中…",
+            # 初始文案不要写"启动中"：真启动完成前它不会被刷新，看起来就像卡住了。
+            # 用一个中性且准确的默认值，并且首帧会强制刷新一次（见 _tick）。
+            text="等待开始…",
             font=self.f_status,
             fg=COLOR_STATUS,
             bg=self._bar_bg,
@@ -311,6 +317,9 @@ class SubtitleOverlay:
                 bg=self._panel_bg,
                 bg_live=str(getattr(ov, "panel_bg_live", "#101010")),
                 auto_scroll=bool(getattr(ov, "auto_scroll", True)),
+                # 鼠标移到面板上时临时关掉穿透，否则滚轮事件收不到（穿透 =
+                # WS_EX_TRANSPARENT = 完全不接收鼠标事件），"滚轮回看历史"会失效
+                on_hover_change=self._on_panel_hover,
             )
             if getattr(ov, "show_scrollbar", True):
                 self.transcript.attach_scrollbar()
@@ -383,6 +392,26 @@ class SubtitleOverlay:
     def _set_cursor(self, name: str) -> None:
         try:
             self.win.configure(cursor=name or "")
+        except Exception:
+            pass
+
+    def _on_panel_hover(self, hovering: bool) -> None:
+        """鼠标进出面板时临时切换"鼠标穿透"。
+
+        为什么需要：面板默认穿透（不挡直播软件的点击），而穿透在 Win32 里就是
+        `WS_EX_TRANSPARENT` —— 那个状态下窗口**不接收任何鼠标事件**，
+        于是滚轮翻历史是失效的。
+
+        折中：移上去时关掉穿透（可以滚动），移开后恢复（继续不挡直播）。
+        用户的感觉就是"鼠标移到字幕上就能滚"。
+        """
+        if not IS_WINDOWS or self.win is None:
+            return
+        # 用户用 F1 手动关过穿透时就不折腾了（那种状态下本来就能滚）
+        if self._hover_override:
+            return
+        try:
+            self._apply_click_through(not hovering)
         except Exception:
             pass
 
@@ -528,8 +557,10 @@ class SubtitleOverlay:
 
     def _handle_action(self, action: str) -> None:
         if action == "toggle_click_through":
+            # 用户手动切换过 → 关掉"悬停自动切换"，尊重用户的选择
+            self._hover_override = True
             self._apply_click_through(not self._click_through)
-            tail = "（现在可以点直播界面了）" if self._click_through else "（现在可以拖动本窗口）"
+            tail = "（现在可以点直播界面了）" if self._click_through else "（现在可以拖动/滚动本窗口）"
             self._flash(f"鼠标穿透：{'开' if self._click_through else '关'}{tail}")
         elif action == "toggle_pause":
             self._paused = not self._paused
@@ -600,6 +631,17 @@ class SubtitleOverlay:
                 self._render()
             except Exception as exc:
                 print(f"[overlay] 渲染异常: {exc}", file=sys.stderr)
+        elif not self._first_render_done:
+            # 首帧强制刷一次状态栏。
+            # _render 只在"状态有变化"时才更新界面，而状态栏的初始文案是
+            # 构造时写死的 —— 万一启动后状态一直没变（例如还停在"启动中"），
+            # 状态栏就会一直显示那个初始值，看起来像卡住了。
+            try:
+                _lines, status = self.state.snapshot()
+                self._render_status(status)
+                self._first_render_done = True
+            except Exception:
+                pass
         self.root.after(40, self._tick)
     def _render(self) -> None:
         lines, status = self.state.snapshot()

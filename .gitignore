@@ -232,6 +232,8 @@ logs/
 stats/
 recordings/
 *.wav
+# 但 samples/ 里的说明文档要进版本库（音频本身仍然忽略）
+!samples/README.md
 
 # 本地 Whisper 模型（几十 MB ~ 几 GB）
 models/
